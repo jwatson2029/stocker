@@ -1,0 +1,9 @@
+server.js
+recordings
+.env
+.env.*
+!.env.example
+.vercel
+.git
+*.log
+.DS_Store

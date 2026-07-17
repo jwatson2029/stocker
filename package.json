@@ -3,13 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "description": "511GA camera viewer and recorder (Vercel + local)",
-  "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js",
-    "vercel-dev": "vercel dev"
+    "dev": "node --watch server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": "20.x"
   }
 }
