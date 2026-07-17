@@ -1,0 +1,15 @@
+{
+  "name": "stocker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "511GA camera viewer and recorder (Vercel + local)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "vercel-dev": "vercel dev"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

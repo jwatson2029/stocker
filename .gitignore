@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Local / Vercel
+.vercel
+.env
+.env.*
+!.env.example
+
+# Local artifacts
+recordings/
+.DS_Store
+*.log
