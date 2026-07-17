@@ -5,9 +5,15 @@
   "description": "511GA camera viewer and recorder (Vercel + local)",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "setup:supabase": "node scripts/setup-supabase.js"
   },
   "engines": {
     "node": "20.x"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.90.1",
+    "dotenv": "^17.2.3",
+    "pg": "^8.16.3"
   }
 }

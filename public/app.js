@@ -22,7 +22,8 @@
   let mediaRecorder = null;
   let recordedChunks = [];
   let recordMime = "video/webm";
-  const sessionRecordings = [];
+  let cameraId = "12084";
+  let recordings = [];
 
   function setStatus(kind, label) {
     liveStatus.classList.remove("live", "recording", "error");
@@ -79,7 +80,7 @@
       stopTimer();
       setStatus("live", "Live");
       recordHint.textContent =
-        "Records in-browser (WebM). Downloads when you stop. Keep the tab open.";
+        "Records in-browser, then uploads to Supabase Storage.";
     }
   }
 
@@ -183,6 +184,7 @@
     if (!res.ok) throw new Error(data.error || "Failed to load camera");
 
     const cam = data.camera || {};
+    cameraId = String(data.cameraId || cameraId);
     const title = cam.Name || "FORS-CCTV-0021";
     const location =
       cam.Location || "SR 141 at Ronald Reagan Blvd (Forsyth)";
@@ -205,32 +207,84 @@
   }
 
   function renderRecordings() {
-    if (!sessionRecordings.length) {
-      recordingList.innerHTML = `<li class="empty">No recordings yet this session</li>`;
+    if (!recordings.length) {
+      recordingList.innerHTML = `<li class="empty">No recordings in Supabase yet</li>`;
       return;
     }
-    recordingList.innerHTML = sessionRecordings
+    recordingList.innerHTML = recordings
       .map(
-        (r, i) => `
+        (r) => `
       <li>
         <p class="rec-name">${r.name}</p>
         <p class="rec-meta">${formatBytes(r.size)} · ${new Date(r.mtime).toLocaleString()}</p>
         <div class="rec-actions">
-          <a class="btn" href="${r.url}" download="${r.name}">Download</a>
+          <a class="btn" href="${r.url}" download="${r.name}" target="_blank" rel="noopener">Download</a>
           <a class="btn" href="${r.url}" target="_blank" rel="noopener">Open</a>
-          <button type="button" class="btn btn-danger" data-delete-index="${i}">Remove</button>
+          <button type="button" class="btn btn-danger" data-delete-id="${r.id}">Delete</button>
         </div>
       </li>`
       )
       .join("");
   }
 
+  async function loadRecordings() {
+    const res = await fetch("/api/recordings");
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to load recordings");
+    recordings = data.recordings || [];
+    renderRecordings();
+  }
+
+  async function uploadToSupabase(blob, name, durationMs) {
+    recordHint.textContent = `Uploading ${name} to Supabase…`;
+
+    const prepareRes = await fetch("/api/recordings/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename: name,
+        contentType: blob.type || "video/webm",
+        cameraId,
+        size: blob.size,
+      }),
+    });
+    const prepare = await prepareRes.json();
+    if (!prepareRes.ok) throw new Error(prepare.error || "Prepare failed");
+
+    const uploadRes = await fetch(prepare.signedUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Type": blob.type || prepare.contentType || "video/webm",
+      },
+      body: blob,
+    });
+    if (!uploadRes.ok) {
+      const text = await uploadRes.text().catch(() => "");
+      throw new Error(`Upload failed (${uploadRes.status}) ${text.slice(0, 120)}`);
+    }
+
+    const confirmRes = await fetch("/api/recordings/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: prepare.path,
+        filename: name,
+        contentType: blob.type || prepare.contentType || "video/webm",
+        size: blob.size,
+        cameraId,
+        durationMs,
+      }),
+    });
+    const saved = await confirmRes.json();
+    if (!confirmRes.ok) throw new Error(saved.error || "Confirm failed");
+    return saved;
+  }
+
   function startRecording() {
     if (!window.MediaRecorder) {
       throw new Error("MediaRecorder not supported in this browser");
     }
-    const capture =
-      player.captureStream || player.mozCaptureStream;
+    const capture = player.captureStream || player.mozCaptureStream;
     if (!capture) {
       throw new Error("Tab capture not supported — try Chrome or Edge");
     }
@@ -245,6 +299,7 @@
 
     const stream = capture.call(player);
     recordedChunks = [];
+    const startedAt = Date.now();
     mediaRecorder = new MediaRecorder(
       stream,
       recordMime ? { mimeType: recordMime } : undefined
@@ -258,28 +313,31 @@
       setRecordingUi(false);
     };
     mediaRecorder.onstop = () => {
+      const durationMs = Date.now() - startedAt;
       const type = recordMime || "video/webm";
       const blob = new Blob(recordedChunks, { type });
       const ext = type.includes("mp4") ? "mp4" : "webm";
       const name = `FORS-0021_${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
-      const url = URL.createObjectURL(blob);
-      sessionRecordings.unshift({
-        name,
-        url,
-        size: blob.size,
-        mtime: new Date().toISOString(),
-      });
-      renderRecordings();
-
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-
-      recordHint.textContent = `Downloaded ${name}`;
       mediaRecorder = null;
+
+      uploadToSupabase(blob, name, durationMs)
+        .then(async (saved) => {
+          recordHint.textContent = `Saved to Supabase: ${saved.name}`;
+          await loadRecordings();
+        })
+        .catch((err) => {
+          console.error(err);
+          recordHint.textContent = err.message || "Upload failed";
+          // Still offer a local download fallback
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = name;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        });
     };
 
     mediaRecorder.start(1000);
@@ -318,17 +376,25 @@
   });
 
   btnReloadList.addEventListener("click", () => {
-    renderRecordings();
+    loadRecordings().catch((err) => {
+      recordHint.textContent = err.message;
+    });
   });
 
-  recordingList.addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-delete-index]");
+  recordingList.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-delete-id]");
     if (!btn) return;
-    const index = Number(btn.getAttribute("data-delete-index"));
-    const item = sessionRecordings[index];
-    if (item) URL.revokeObjectURL(item.url);
-    sessionRecordings.splice(index, 1);
-    renderRecordings();
+    const id = btn.getAttribute("data-delete-id");
+    if (!confirm("Delete this recording from Supabase?")) return;
+    const res = await fetch(`/api/recordings/delete?id=${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      recordHint.textContent = data.error || "Delete failed";
+      return;
+    }
+    await loadRecordings();
   });
 
   loadCamera().catch((err) => {
@@ -337,9 +403,10 @@
   });
   attachStream();
   refreshStill();
-  renderRecordings();
+  loadRecordings().catch((err) => {
+    recordingList.innerHTML = `<li class="empty">${err.message}</li>`;
+  });
 
   setInterval(refreshStill, 60_000);
-  // Stream tokens expire in ~2 minutes — refresh before that.
   setInterval(refreshStreamToken, 90_000);
 })();

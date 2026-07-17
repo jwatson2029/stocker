@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -7,6 +9,7 @@ const {
   getStillBuffer,
   IMAGE_ID,
 } = require("./lib/ga511");
+const { handleRecordingsApi } = require("./lib/recordings");
 
 const PORT = process.env.PORT || 3456;
 const ROOT = __dirname;
@@ -37,9 +40,30 @@ async function handleApi(req, res, pathname, searchParams) {
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
     });
     res.end();
+    return;
+  }
+
+  if (pathname === "/api/recordings" && req.method === "GET") {
+    await handleRecordingsApi(req, res, "list");
+    return;
+  }
+  if (pathname === "/api/recordings/prepare" && req.method === "POST") {
+    await handleRecordingsApi(req, res, "prepare");
+    return;
+  }
+  if (pathname === "/api/recordings/confirm" && req.method === "POST") {
+    await handleRecordingsApi(req, res, "confirm");
+    return;
+  }
+  if (
+    (pathname === "/api/recordings/delete" || pathname === "/api/recordings") &&
+    req.method === "DELETE"
+  ) {
+    await handleRecordingsApi(req, res, "delete");
     return;
   }
 
@@ -122,5 +146,4 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Stocker local server at http://localhost:${PORT}`);
-  console.log("Same API surface as Vercel (/api/camera, /api/video-url, /api/still)");
 });
