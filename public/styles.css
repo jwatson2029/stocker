@@ -136,7 +136,7 @@ body {
 
 .player-wrap {
   position: relative;
-  min-height: 420px;
+  min-height: 480px;
   background: #050607;
   overflow: hidden;
   box-shadow: var(--shadow);
@@ -146,9 +146,13 @@ body {
 #player {
   display: block;
   width: 100%;
+  height: auto;
+  min-height: 480px;
   aspect-ratio: 16 / 9;
   background: #000;
   object-fit: contain;
+  /* Prefer sharp upscale of the source, not browser downscale blur */
+  image-rendering: high-quality;
 }
 
 .player-shade {
@@ -291,7 +295,9 @@ body {
   display: block;
   width: 100%;
   aspect-ratio: 16 / 9;
-  object-fit: cover;
+  object-fit: contain;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: high-quality;
   background: #000;
   border: 1px solid var(--line);
 }

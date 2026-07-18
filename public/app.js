@@ -80,7 +80,7 @@
       stopTimer();
       setStatus("live", "Live");
       recordHint.textContent =
-        "Records in-browser, then uploads to Supabase Storage.";
+        "Browser capture uploads to Supabase. For 24/7, run: npm run record:24x7";
     }
   }
 
@@ -125,13 +125,31 @@
         enableWorker: true,
         lowLatencyMode: false,
         liveDurationInfinity: true,
+        // Prefer the highest available quality; do not downscale to player size.
+        startLevel: -1,
+        autoStartLoad: true,
+        capLevelToPlayerSize: false,
         manifestLoadingMaxRetry: 6,
         levelLoadingMaxRetry: 6,
         fragLoadingMaxRetry: 6,
       });
       hls.loadSource(url);
       hls.attachMedia(player);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
+        const levels = data?.levels || [];
+        if (levels.length > 1) {
+          let best = 0;
+          for (let i = 1; i < levels.length; i++) {
+            const a = (levels[i].width || 0) * (levels[i].height || 0);
+            const b = (levels[best].width || 0) * (levels[best].height || 0);
+            if (a > b || (a === b && (levels[i].bitrate || 0) > (levels[best].bitrate || 0))) {
+              best = i;
+            }
+          }
+          hls.currentLevel = best;
+          hls.nextLevel = best;
+          hls.loadLevel = best;
+        }
         player.play().catch(() => {});
         if (!isRecording) setStatus("live", "Live");
       });
@@ -407,6 +425,6 @@
     recordingList.innerHTML = `<li class="empty">${err.message}</li>`;
   });
 
-  setInterval(refreshStill, 60_000);
+  setInterval(refreshStill, 30_000);
   setInterval(refreshStreamToken, 90_000);
 })();
