@@ -2,11 +2,12 @@
 /**
  * Continuous 24/7 HLS recorder → Supabase Storage.
  *
- * Requires ffmpeg on PATH. Keeps recording in segment files, uploads each
- * finished segment, then starts the next (refreshing the signed stream URL).
+ * Requires ffmpeg on PATH. Records fixed-length segments, uploads each one,
+ * then deletes recordings older than the retention window (default 24h).
  *
  * Usage: npm run record:24x7
- * Env:   RECORD_SEGMENT_SECS (default 600 = 10 min)
+ * Env:   RECORD_SEGMENT_SECS (default 60)
+ *        RECORD_RETENTION_HOURS (default 24)
  */
 require("dotenv").config();
 
@@ -16,10 +17,15 @@ const os = require("os");
 const path = require("path");
 const { getSignedVideoUrl, CAMERA_ID, IMAGE_ID } = require("../lib/ga511");
 const { getServiceClient, BUCKET } = require("../lib/supabase");
+const { deleteOlderThan } = require("../lib/recordings");
 
 const SEGMENT_SECS = Math.max(
-  60,
-  Number(process.env.RECORD_SEGMENT_SECS || 600)
+  10,
+  Number(process.env.RECORD_SEGMENT_SECS || 60)
+);
+const RETENTION_HOURS = Math.max(
+  1,
+  Number(process.env.RECORD_RETENTION_HOURS || 24)
 );
 const TMP_DIR = path.join(os.tmpdir(), "stocker-record");
 const RETRY_MS = 5000;
@@ -112,6 +118,16 @@ async function uploadSegment(filePath, durationMs) {
   return { id: data.id, filename: data.filename, size, path: storagePath };
 }
 
+async function pruneOldRecordings() {
+  const result = await deleteOlderThan({ hours: RETENTION_HOURS });
+  if (result.deleted > 0) {
+    log(
+      `Pruned ${result.deleted} recording(s) older than ${RETENTION_HOURS}h (before ${result.cutoff})`
+    );
+  }
+  return result;
+}
+
 async function recordOneSegment() {
   ensureTmp();
   const url = await getSignedVideoUrl(IMAGE_ID);
@@ -123,6 +139,7 @@ async function recordOneSegment() {
     const durationMs = Date.now() - started;
     const saved = await uploadSegment(outFile, durationMs);
     log(`Uploaded ${saved.filename} (${saved.size} bytes) → ${saved.path}`);
+    await pruneOldRecordings();
     return saved;
   } finally {
     try {
@@ -135,10 +152,10 @@ async function recordOneSegment() {
 
 async function main() {
   log(
-    `24/7 recorder starting (camera ${CAMERA_ID}, view ${IMAGE_ID}, segment ${SEGMENT_SECS}s)`
+    `24/7 recorder starting (camera ${CAMERA_ID}, view ${IMAGE_ID}, segment ${SEGMENT_SECS}s, retain ${RETENTION_HOURS}h)`
   );
-  // Touch Supabase once so WebSocket/config errors surface immediately.
   getServiceClient();
+  await pruneOldRecordings();
 
   for (;;) {
     try {

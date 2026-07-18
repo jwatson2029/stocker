@@ -10,6 +10,7 @@
 require("dotenv").config();
 
 const { captureHlsClip, uploadClipBuffer } = require("../../lib/hls-capture");
+const { deleteOlderThan } = require("../../lib/recordings");
 
 function sendJson(res, status, data) {
   res.statusCode = status;
@@ -51,6 +52,10 @@ module.exports = async function handler(req, res) {
   const durationSecs = Math.min(120, Math.max(10, Number(rawDur) || 45));
   // Leave headroom under Vercel maxDuration (300s hobby / configurable).
   const maxWaitMs = Math.min(250_000, durationSecs * 1000 + 30_000);
+  const retentionHours = Math.max(
+    1,
+    Number(process.env.RECORD_RETENTION_HOURS || 24)
+  );
 
   try {
     const clip = await captureHlsClip({ durationSecs, maxWaitMs });
@@ -61,10 +66,12 @@ module.exports = async function handler(req, res) {
       durationMs: clip.durationMs,
       source: "cron",
     });
+    const pruned = await deleteOlderThan({ hours: retentionHours });
     sendJson(res, 200, {
       ok: true,
       recording: saved,
       segments: clip.segmentCount,
+      pruned: pruned.deleted,
     });
   } catch (err) {
     console.error("cron/record failed", err);
