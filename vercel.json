@@ -3,6 +3,18 @@
   "framework": null,
   "buildCommand": null,
   "outputDirectory": "public",
+  "functions": {
+    "api/cron/record.js": {
+      "maxDuration": 300,
+      "memory": 1024
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/record",
+      "schedule": "*/5 * * * *"
+    }
+  ],
   "headers": [
     {
       "source": "/api/(.*)",

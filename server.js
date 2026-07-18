@@ -103,6 +103,12 @@ async function handleApi(req, res, pathname, searchParams) {
     return;
   }
 
+  if (pathname === "/api/cron/record") {
+    const handler = require("./api/cron/record");
+    await handler(req, res);
+    return;
+  }
+
   sendJson(res, 404, { error: "Not found" });
 }
 
