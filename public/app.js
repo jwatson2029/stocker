@@ -111,7 +111,8 @@
       stopTimer();
       setStatus("live", "Live");
       recordHint.textContent =
-        "Browser capture uploads to Supabase. For 24/7, run: npm run record:24x7";
+        "Browser capture uploads to Supabase. For 24/7, deploy the Render worker (render.yaml) or run: npm run record:24x7";
+
     }
   }
 

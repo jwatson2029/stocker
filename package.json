@@ -2,12 +2,13 @@
   "name": "stocker",
   "version": "1.0.0",
   "private": true,
-  "description": "511GA camera viewer and recorder (Vercel + local)",
+  "description": "511GA camera viewer and recorder (Vercel + Render 24/7 worker)",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
     "setup:supabase": "node scripts/setup-supabase.js",
-    "record:24x7": "node scripts/record-24x7.js"
+    "record:24x7": "node scripts/record-24x7.js",
+    "record:24x7:docker": "docker build -t stocker-recorder . && docker run --env-file .env --rm stocker-recorder"
   },
   "engines": {
     "node": ">=20"

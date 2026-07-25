@@ -1,0 +1,12 @@
+node_modules
+.git
+.vercel
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+recordings
+tmp
+.cursor
+agent-transcripts

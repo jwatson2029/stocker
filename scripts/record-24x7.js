@@ -6,6 +6,7 @@
  * then deletes recordings older than the retention window (default 24h).
  *
  * Usage: npm run record:24x7
+ *        Docker / Render worker: see Dockerfile + render.yaml
  * Env:   RECORD_SEGMENT_SECS (default 60)
  *        RECORD_RETENTION_HOURS (default 24)
  */
@@ -29,6 +30,10 @@ const RETENTION_HOURS = Math.max(
 );
 const TMP_DIR = path.join(os.tmpdir(), "stocker-record");
 const RETRY_MS = 5000;
+
+/** @type {import("child_process").ChildProcess | null} */
+let activeFfmpeg = null;
+let shuttingDown = false;
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
@@ -64,11 +69,13 @@ function runFfmpeg(url, outFile, seconds) {
       outFile,
     ];
     const child = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+    activeFfmpeg = child;
     let err = "";
     child.stderr.on("data", (d) => {
       err += d.toString();
     });
     child.on("error", (e) => {
+      if (activeFfmpeg === child) activeFfmpeg = null;
       reject(
         new Error(
           `ffmpeg failed to start (${e.message}). Install ffmpeg and ensure it is on PATH.`
@@ -76,6 +83,11 @@ function runFfmpeg(url, outFile, seconds) {
       );
     });
     child.on("close", (code) => {
+      if (activeFfmpeg === child) activeFfmpeg = null;
+      if (shuttingDown) {
+        reject(new Error("shutdown"));
+        return;
+      }
       if (code === 0 && fs.existsSync(outFile) && fs.statSync(outFile).size > 0) {
         resolve();
       } else {
@@ -83,6 +95,19 @@ function runFfmpeg(url, outFile, seconds) {
       }
     });
   });
+}
+
+function requestShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log(`Received ${signal}, shutting down…`);
+  if (activeFfmpeg && !activeFfmpeg.killed) {
+    try {
+      activeFfmpeg.kill("SIGTERM");
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 async function uploadSegment(filePath, durationMs) {
@@ -151,20 +176,27 @@ async function recordOneSegment() {
 }
 
 async function main() {
+  process.on("SIGTERM", () => requestShutdown("SIGTERM"));
+  process.on("SIGINT", () => requestShutdown("SIGINT"));
+
   log(
     `24/7 recorder starting (camera ${CAMERA_ID}, view ${IMAGE_ID}, segment ${SEGMENT_SECS}s, retain ${RETENTION_HOURS}h)`
   );
   getServiceClient();
   await pruneOldRecordings();
 
-  for (;;) {
+  while (!shuttingDown) {
     try {
       await recordOneSegment();
     } catch (err) {
+      if (shuttingDown) break;
       log("Segment failed:", err.message || err);
       await sleep(RETRY_MS);
     }
   }
+
+  log("Recorder stopped.");
+  process.exit(0);
 }
 
 main().catch((err) => {

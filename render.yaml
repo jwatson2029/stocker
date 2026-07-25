@@ -1,0 +1,35 @@
+# Always-on 24/7 camera recorder → Supabase.
+# Deploy: https://dashboard.render.com → New → Blueprint → this repo
+#
+# After create, set these env vars in the Render dashboard (sync: false below):
+#   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, API_KEY
+# Optional: IMAGE_ID, CAMERA_ID, RECORD_SEGMENT_SECS, RECORD_RETENTION_HOURS
+#
+# Use a paid worker plan (Starter+) so the process does not sleep.
+
+services:
+  - type: worker
+    name: stocker-recorder
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerCommand: npm run record:24x7
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: API_KEY
+        sync: false
+      - key: IMAGE_ID
+        value: "19494"
+      - key: CAMERA_ID
+        value: "12084"
+      - key: RECORD_SEGMENT_SECS
+        value: "60"
+      - key: RECORD_RETENTION_HOURS
+        value: "24"
