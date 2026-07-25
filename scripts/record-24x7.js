@@ -12,6 +12,7 @@
  */
 require("dotenv").config();
 
+const http = require("http");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -30,10 +31,16 @@ const RETENTION_HOURS = Math.max(
 );
 const TMP_DIR = path.join(os.tmpdir(), "stocker-record");
 const RETRY_MS = 5000;
+const PORT = Number(process.env.PORT || 0);
 
 /** @type {import("child_process").ChildProcess | null} */
 let activeFfmpeg = null;
 let shuttingDown = false;
+let lastSegmentAt = null;
+let lastError = null;
+let segmentsUploaded = 0;
+/** @type {import("http").Server | null} */
+let healthServer = null;
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
@@ -108,6 +115,51 @@ function requestShutdown(signal) {
       /* ignore */
     }
   }
+  if (healthServer) {
+    healthServer.close();
+  }
+}
+
+/**
+ * Render web services require binding $PORT before deploy is marked live.
+ * Start a tiny health server first, then run the recorder loop.
+ */
+function listenHealthServer() {
+  if (!PORT) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    healthServer = http.createServer((req, res) => {
+      const url = req.url || "/";
+      if (url === "/healthz" || url === "/" || url === "/health") {
+        const body = JSON.stringify({
+          ok: true,
+          service: "stocker-recorder",
+          cameraId: CAMERA_ID,
+          imageId: IMAGE_ID,
+          segmentSecs: SEGMENT_SECS,
+          retentionHours: RETENTION_HOURS,
+          segmentsUploaded,
+          lastSegmentAt,
+          lastError,
+          recording: !shuttingDown,
+        });
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store",
+        });
+        res.end(body);
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("Not found");
+    });
+
+    healthServer.once("error", reject);
+    healthServer.listen(PORT, "0.0.0.0", () => {
+      log(`Health server listening on 0.0.0.0:${PORT}`);
+      resolve();
+    });
+  });
 }
 
 async function uploadSegment(filePath, durationMs) {
@@ -163,6 +215,9 @@ async function recordOneSegment() {
     await runFfmpeg(url, outFile, SEGMENT_SECS);
     const durationMs = Date.now() - started;
     const saved = await uploadSegment(outFile, durationMs);
+    segmentsUploaded += 1;
+    lastSegmentAt = new Date().toISOString();
+    lastError = null;
     log(`Uploaded ${saved.filename} (${saved.size} bytes) → ${saved.path}`);
     await pruneOldRecordings();
     return saved;
@@ -179,6 +234,9 @@ async function main() {
   process.on("SIGTERM", () => requestShutdown("SIGTERM"));
   process.on("SIGINT", () => requestShutdown("SIGINT"));
 
+  // Bind PORT first so Render marks the deploy as live, then record.
+  await listenHealthServer();
+
   log(
     `24/7 recorder starting (camera ${CAMERA_ID}, view ${IMAGE_ID}, segment ${SEGMENT_SECS}s, retain ${RETENTION_HOURS}h)`
   );
@@ -190,6 +248,7 @@ async function main() {
       await recordOneSegment();
     } catch (err) {
       if (shuttingDown) break;
+      lastError = String(err.message || err);
       log("Segment failed:", err.message || err);
       await sleep(RETRY_MS);
     }
