@@ -109,6 +109,12 @@ async function handleApi(req, res, pathname, searchParams) {
     return;
   }
 
+  if (pathname === "/api/cron/prune") {
+    const handler = require("./api/cron/prune");
+    await handler(req, res);
+    return;
+  }
+
   sendJson(res, 404, { error: "Not found" });
 }
 

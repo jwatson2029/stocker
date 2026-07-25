@@ -7,12 +7,20 @@
     "api/cron/record.js": {
       "maxDuration": 300,
       "memory": 1024
+    },
+    "api/cron/prune.js": {
+      "maxDuration": 60,
+      "memory": 512
     }
   },
   "crons": [
     {
       "path": "/api/cron/record",
       "schedule": "0 12 * * *"
+    },
+    {
+      "path": "/api/cron/prune",
+      "schedule": "0 * * * *"
     }
   ],
   "headers": [

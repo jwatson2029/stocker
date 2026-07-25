@@ -32,15 +32,23 @@ const RETENTION_HOURS = Math.max(
 const TMP_DIR = path.join(os.tmpdir(), "stocker-record");
 const RETRY_MS = 5000;
 const PORT = Number(process.env.PORT || 0);
+/** How often to purge clips older than RECORD_RETENTION_HOURS (default 1h). */
+const PRUNE_INTERVAL_MS = Math.max(
+  60_000,
+  Number(process.env.RECORD_PRUNE_INTERVAL_MS || 60 * 60 * 1000)
+);
 
 /** @type {import("child_process").ChildProcess | null} */
 let activeFfmpeg = null;
 let shuttingDown = false;
 let lastSegmentAt = null;
 let lastError = null;
+let lastPruneAt = null;
 let segmentsUploaded = 0;
 /** @type {import("http").Server | null} */
 let healthServer = null;
+/** @type {ReturnType<typeof setInterval> | null} */
+let pruneTimer = null;
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
@@ -140,6 +148,7 @@ function listenHealthServer() {
           retentionHours: RETENTION_HOURS,
           segmentsUploaded,
           lastSegmentAt,
+          lastPruneAt,
           lastError,
           recording: !shuttingDown,
         });
@@ -197,10 +206,13 @@ async function uploadSegment(filePath, durationMs) {
 
 async function pruneOldRecordings() {
   const result = await deleteOlderThan({ hours: RETENTION_HOURS });
+  lastPruneAt = new Date().toISOString();
   if (result.deleted > 0) {
     log(
       `Pruned ${result.deleted} recording(s) older than ${RETENTION_HOURS}h (before ${result.cutoff})`
     );
+  } else {
+    log(`Retention check OK — nothing older than ${RETENTION_HOURS}h`);
   }
   return result;
 }
@@ -219,7 +231,6 @@ async function recordOneSegment() {
     lastSegmentAt = new Date().toISOString();
     lastError = null;
     log(`Uploaded ${saved.filename} (${saved.size} bytes) → ${saved.path}`);
-    await pruneOldRecordings();
     return saved;
   } finally {
     try {
@@ -238,10 +249,16 @@ async function main() {
   await listenHealthServer();
 
   log(
-    `24/7 recorder starting (camera ${CAMERA_ID}, view ${IMAGE_ID}, segment ${SEGMENT_SECS}s, retain ${RETENTION_HOURS}h)`
+    `24/7 recorder starting (camera ${CAMERA_ID}, view ${IMAGE_ID}, segment ${SEGMENT_SECS}s, retain ${RETENTION_HOURS}h, prune every ${Math.round(PRUNE_INTERVAL_MS / 60000)}m)`
   );
   getServiceClient();
   await pruneOldRecordings();
+  pruneTimer = setInterval(() => {
+    pruneOldRecordings().catch((err) => {
+      log("Prune failed:", err.message || err);
+    });
+  }, PRUNE_INTERVAL_MS);
+  if (typeof pruneTimer.unref === "function") pruneTimer.unref();
 
   while (!shuttingDown) {
     try {
@@ -254,6 +271,7 @@ async function main() {
     }
   }
 
+  if (pruneTimer) clearInterval(pruneTimer);
   log("Recorder stopped.");
   process.exit(0);
 }
