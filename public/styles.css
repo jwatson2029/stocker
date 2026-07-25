@@ -105,12 +105,6 @@ body {
   animation: pulse 1.6s ease-in-out infinite;
 }
 
-.status-pill.motion .dot {
-  background: var(--go);
-  box-shadow: 0 0 14px rgba(62, 207, 142, 1);
-  animation: pulse 0.7s ease-in-out infinite;
-}
-
 .status-pill.recording .dot {
   background: var(--stop);
   box-shadow: 0 0 12px rgba(255, 92, 92, 0.8);
@@ -159,47 +153,6 @@ body {
   object-fit: contain;
   /* Prefer sharp upscale of the source, not browser downscale blur */
   image-rendering: high-quality;
-}
-
-.motion-overlay {
-  pointer-events: none;
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 2;
-}
-
-.motion-hud {
-  pointer-events: none;
-  position: absolute;
-  top: 0.85rem;
-  right: 0.85rem;
-  z-index: 3;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  padding: 0.35rem 0.65rem;
-  border: 1px solid rgba(62, 207, 142, 0.45);
-  background: rgba(8, 14, 12, 0.72);
-  color: var(--go);
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.motion-hud[hidden] {
-  display: none;
-}
-
-.motion-hud-dot {
-  width: 0.45rem;
-  height: 0.45rem;
-  border-radius: 50%;
-  background: var(--go);
-  box-shadow: 0 0 10px rgba(62, 207, 142, 0.9);
-  animation: pulse 1.1s ease-in-out infinite;
 }
 
 .player-shade {
@@ -312,12 +265,6 @@ body {
   background: rgba(255, 92, 92, 0.16);
   border-color: rgba(255, 92, 92, 0.5);
   color: #ffb0b0;
-}
-
-.btn-motion.active {
-  background: rgba(62, 207, 142, 0.14);
-  border-color: rgba(62, 207, 142, 0.5);
-  color: #8ef0c0;
 }
 
 .btn-danger {
