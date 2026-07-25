@@ -49,15 +49,8 @@
             <h2>Live controls</h2>
             <div class="btn-row">
               <button type="button" class="btn" id="btnRefresh">Refresh stream</button>
-              <button type="button" class="btn" id="btnMute">Unmute</button>
-              <button type="button" class="btn btn-motion active" id="btnMotion" aria-pressed="true">Motion on</button>
             </div>
-            <div class="btn-row">
-              <button type="button" class="btn btn-record" id="btnRecord">Start recording</button>
-              <button type="button" class="btn btn-danger" id="btnStop" disabled>Stop</button>
-            </div>
-            <p class="hint" id="recordHint">Browser capture uploads to Supabase. For 24/7, deploy the Render worker (render.yaml) or run: npm run record:24x7</p>
-            <p class="timer" id="recordTimer" hidden>00:00:00</p>
+            <p class="hint" id="recordHint">24/7 recording runs on the Render worker (render.yaml).</p>
           </section>
 
           <section class="panel">

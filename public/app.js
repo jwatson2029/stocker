@@ -11,21 +11,10 @@
   const metaList = document.getElementById("metaList");
   const recordingList = document.getElementById("recordingList");
   const recordHint = document.getElementById("recordHint");
-  const recordTimer = document.getElementById("recordTimer");
   const btnRefresh = document.getElementById("btnRefresh");
-  const btnMute = document.getElementById("btnMute");
-  const btnMotion = document.getElementById("btnMotion");
-  const btnRecord = document.getElementById("btnRecord");
-  const btnStop = document.getElementById("btnStop");
   const btnReloadList = document.getElementById("btnReloadList");
 
   let hls = null;
-  let recordStartedAt = null;
-  let timerId = null;
-  let isRecording = false;
-  let mediaRecorder = null;
-  let recordedChunks = [];
-  let recordMime = "video/webm";
   let cameraId = "12084";
   let recordings = [];
   let motionEnabled = true;
@@ -66,54 +55,6 @@
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
     return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  }
-
-  function formatDuration(ms) {
-    const total = Math.max(0, Math.floor(ms / 1000));
-    const h = String(Math.floor(total / 3600)).padStart(2, "0");
-    const m = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
-    const s = String(total % 60).padStart(2, "0");
-    return `${h}:${m}:${s}`;
-  }
-
-  function tickTimer() {
-    if (!recordStartedAt) return;
-    recordTimer.textContent = formatDuration(Date.now() - recordStartedAt);
-  }
-
-  function startTimer() {
-    recordStartedAt = Date.now();
-    recordTimer.hidden = false;
-    tickTimer();
-    clearInterval(timerId);
-    timerId = setInterval(tickTimer, 250);
-  }
-
-  function stopTimer() {
-    clearInterval(timerId);
-    timerId = null;
-    recordStartedAt = null;
-    recordTimer.hidden = true;
-    recordTimer.textContent = "00:00:00";
-  }
-
-  function setRecordingUi(active) {
-    isRecording = active;
-    btnRecord.disabled = active;
-    btnStop.disabled = !active;
-    btnRecord.classList.toggle("active", active);
-    btnRecord.textContent = active ? "Recording…" : "Start recording";
-    if (active) {
-      startTimer();
-      setStatus("recording", "Recording");
-      recordHint.textContent = "Recording in this browser tab — keep the tab open";
-    } else {
-      stopTimer();
-      setStatus("live", "Live");
-      recordHint.textContent =
-        "Browser capture uploads to Supabase. For 24/7, deploy the Render worker (render.yaml) or run: npm run record:24x7";
-
-    }
   }
 
   function getVideoContentRect() {
@@ -370,8 +311,8 @@
     if (showing) {
       motionHudLabel.textContent =
         activeCount === 1 ? "Motion" : `Motion ×${activeCount}`;
-      if (!isRecording) setStatus("motion", "Motion");
-    } else if (!isRecording && liveStatus.classList.contains("motion")) {
+      setStatus("motion", "Motion");
+    } else if (liveStatus.classList.contains("motion")) {
       setStatus("live", "Live");
     }
   }
@@ -395,37 +336,6 @@
     motionTimer = 0;
     cancelAnimationFrame(motionRaf);
     motionRaf = 0;
-  }
-
-  function setMotionEnabled(on) {
-    motionEnabled = on;
-    btnMotion.classList.toggle("active", on);
-    btnMotion.setAttribute("aria-pressed", on ? "true" : "false");
-    btnMotion.textContent = on ? "Motion on" : "Motion off";
-    if (!on) {
-      trackedBoxes = [];
-      prevGray = null;
-      stopMotionLoop();
-      overlayCtx.clearRect(0, 0, motionOverlay.width, motionOverlay.height);
-      motionHud.hidden = true;
-      if (!isRecording && liveStatus.classList.contains("motion")) {
-        setStatus("live", "Live");
-      }
-    } else {
-      startMotionLoop();
-    }
-  }
-
-  function pickMimeType() {
-    const types = [
-      "video/webm;codecs=vp9,opus",
-      "video/webm;codecs=vp8,opus",
-      "video/webm;codecs=vp9",
-      "video/webm",
-      "video/mp4",
-    ];
-    if (!window.MediaRecorder) return null;
-    return types.find((t) => MediaRecorder.isTypeSupported(t)) || "";
   }
 
   async function fetchSignedUrl() {
@@ -483,7 +393,7 @@
           hls.loadLevel = best;
         }
         player.play().catch(() => {});
-        if (!isRecording) setStatus("live", "Live");
+        setStatus("live", "Live");
       });
       hls.on(Hls.Events.ERROR, (_e, data) => {
         if (!data.fatal) return;
@@ -497,7 +407,7 @@
         "loadedmetadata",
         () => {
           player.play().catch(() => {});
-          if (!isRecording) setStatus("live", "Live");
+          setStatus("live", "Live");
         },
         { once: true }
       );
@@ -585,148 +495,10 @@
     renderRecordings();
   }
 
-  async function uploadToSupabase(blob, name, durationMs) {
-    recordHint.textContent = `Uploading ${name} to Supabase…`;
-
-    const prepareRes = await fetch("/api/recordings/prepare", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        filename: name,
-        contentType: blob.type || "video/webm",
-        cameraId,
-        size: blob.size,
-      }),
-    });
-    const prepare = await prepareRes.json();
-    if (!prepareRes.ok) throw new Error(prepare.error || "Prepare failed");
-
-    const uploadRes = await fetch(prepare.signedUrl, {
-      method: "PUT",
-      headers: {
-        "Content-Type": blob.type || prepare.contentType || "video/webm",
-      },
-      body: blob,
-    });
-    if (!uploadRes.ok) {
-      const text = await uploadRes.text().catch(() => "");
-      throw new Error(`Upload failed (${uploadRes.status}) ${text.slice(0, 120)}`);
-    }
-
-    const confirmRes = await fetch("/api/recordings/confirm", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        path: prepare.path,
-        filename: name,
-        contentType: blob.type || prepare.contentType || "video/webm",
-        size: blob.size,
-        cameraId,
-        durationMs,
-      }),
-    });
-    const saved = await confirmRes.json();
-    if (!confirmRes.ok) throw new Error(saved.error || "Confirm failed");
-    return saved;
-  }
-
-  function startRecording() {
-    if (!window.MediaRecorder) {
-      throw new Error("MediaRecorder not supported in this browser");
-    }
-    const capture = player.captureStream || player.mozCaptureStream;
-    if (!capture) {
-      throw new Error("Tab capture not supported — try Chrome or Edge");
-    }
-    if (player.readyState < 2) {
-      throw new Error("Wait for the live video to start first");
-    }
-
-    recordMime = pickMimeType();
-    if (recordMime === null) {
-      throw new Error("MediaRecorder not supported");
-    }
-
-    const stream = capture.call(player);
-    recordedChunks = [];
-    const startedAt = Date.now();
-    mediaRecorder = new MediaRecorder(
-      stream,
-      recordMime ? { mimeType: recordMime } : undefined
-    );
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) recordedChunks.push(e.data);
-    };
-    mediaRecorder.onerror = (e) => {
-      console.error(e);
-      recordHint.textContent = "Recording error — see console";
-      setRecordingUi(false);
-    };
-    mediaRecorder.onstop = () => {
-      const durationMs = Date.now() - startedAt;
-      const type = recordMime || "video/webm";
-      const blob = new Blob(recordedChunks, { type });
-      const ext = type.includes("mp4") ? "mp4" : "webm";
-      const name = `FORS-0021_${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
-      mediaRecorder = null;
-
-      uploadToSupabase(blob, name, durationMs)
-        .then(async (saved) => {
-          recordHint.textContent = `Saved to Supabase: ${saved.name}`;
-          await loadRecordings();
-        })
-        .catch((err) => {
-          console.error(err);
-          recordHint.textContent = err.message || "Upload failed";
-          // Still offer a local download fallback
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = name;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          URL.revokeObjectURL(url);
-        });
-    };
-
-    mediaRecorder.start(1000);
-    setRecordingUi(true);
-  }
-
-  function stopRecording() {
-    if (mediaRecorder && mediaRecorder.state !== "inactive") {
-      mediaRecorder.stop();
-    }
-    setRecordingUi(false);
-  }
-
   btnRefresh.addEventListener("click", () => {
     setStatus("", "Refreshing…");
     attachStream();
     refreshStill();
-  });
-
-  btnMute.addEventListener("click", () => {
-    player.muted = !player.muted;
-    btnMute.textContent = player.muted ? "Unmute" : "Mute";
-  });
-
-  btnMotion.addEventListener("click", () => {
-    setMotionEnabled(!motionEnabled);
-  });
-
-  btnRecord.addEventListener("click", () => {
-    try {
-      startRecording();
-    } catch (err) {
-      recordHint.textContent = err.message;
-      btnRecord.disabled = false;
-    }
-  });
-
-  btnStop.addEventListener("click", () => {
-    stopRecording();
   });
 
   btnReloadList.addEventListener("click", () => {
