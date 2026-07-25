@@ -33,7 +33,8 @@
   const CELL_RATIO = 0.16;
   const MIN_CELLS = 2;
   const BOX_HOLD_MS = 900;
-  const MOTION_INTERVAL_MS = 350;
+  // Still frames are proxied through Vercel — keep this slow to avoid Fast Origin Transfer burn.
+  const MOTION_INTERVAL_MS = 5_000;
   const sampleCanvas = document.createElement("canvas");
   sampleCanvas.width = SAMPLE_W;
   sampleCanvas.height = SAMPLE_H;
@@ -189,7 +190,8 @@
     motionBusy = true;
     try {
       // Same-origin still avoids CORS tainting on the cross-origin HLS video.
-      const url = `/api/still?t=${Date.now()}`;
+      // No cache-bust query — api/still sets a short max-age so the CDN can reuse frames.
+      const url = "/api/still";
       analysisImg.src = url;
       await analysisImg.decode();
       sampleCtx.drawImage(analysisImg, 0, 0, SAMPLE_W, SAMPLE_H);

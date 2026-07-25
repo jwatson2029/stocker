@@ -1,7 +1,7 @@
 const { getStillBuffer, setCors } = require("../lib/ga511");
 
 module.exports = async function handler(req, res) {
-  setCors(res);
+  setCors(res, { cacheControl: "public, max-age=5, s-maxage=5" });
   if (req.method === "OPTIONS") {
     res.statusCode = 204;
     res.end();

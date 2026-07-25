@@ -25,7 +25,13 @@
   ],
   "headers": [
     {
-      "source": "/api/(.*)",
+      "source": "/api/still",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=5, s-maxage=5" }
+      ]
+    },
+    {
+      "source": "/api/((?!still$).*)",
       "headers": [{ "key": "Cache-Control", "value": "no-store" }]
     }
   ]

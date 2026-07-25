@@ -92,7 +92,7 @@ async function handleApi(req, res, pathname, searchParams) {
       const { buffer, contentType } = await getStillBuffer();
       res.writeHead(200, {
         "Content-Type": contentType,
-        "Cache-Control": "no-store",
+        "Cache-Control": "public, max-age=5, s-maxage=5",
         "Content-Length": buffer.length,
         "Access-Control-Allow-Origin": "*",
       });
