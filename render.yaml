@@ -3,10 +3,12 @@
 #
 # Required env vars in the dashboard:
 #   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, API_KEY
-# Optional: IMAGE_ID, CAMERA_ID, RECORD_SEGMENT_SECS, RECORD_RETENTION_HOURS
-# Quiet hours (America/New_York): pause 8 PM–6 AM, resume 6:01 AM
+# Optional: IMAGE_ID, CAMERA_ID, RECORD_SEGMENT_SECS, RECORD_IDLE_SECS,
+#           RECORD_ENCODE, RECORD_VIDEO_BITRATE, RECORD_MAX_WIDTH,
+#           RECORD_RETENTION_HOURS
 #
-# Use Starter+ so the instance does not sleep (Free sleeps after idle).
+# Defaults: continuous 30s, source quality, no quiet hours.
+# On Render Hobby (5 GB egress) set RECORD_ENCODE=1 and RECORD_IDLE_SECS=600.
 
 services:
   - type: web
@@ -32,12 +34,16 @@ services:
       - key: CAMERA_ID
         value: "12084"
       - key: RECORD_SEGMENT_SECS
-        value: "60"
+        value: "30"
+      - key: RECORD_IDLE_SECS
+        value: "0"
+      - key: RECORD_ENCODE
+        value: "0"
       - key: RECORD_RETENTION_HOURS
         value: "24"
       - key: RECORD_TZ
         value: America/New_York
       - key: RECORD_QUIET_START
-        value: "20:00"
+        value: "00:00"
       - key: RECORD_QUIET_END
-        value: "06:01"
+        value: "00:00"

@@ -1,20 +1,22 @@
 #!/usr/bin/env node
 /**
- * Daytime HLS recorder → Supabase Storage.
+ * 24/7 HLS recorder → Supabase Storage.
  *
  * Requires ffmpeg on PATH. Records fixed-length segments, uploads each one,
  * then deletes recordings older than the retention window (default 24h).
  *
- * Quiet hours (default America/New_York): pauses 8:00 PM–6:00 AM,
- * resumes at 6:01 AM.
+ * Defaults: continuous 30s clips, full source quality (stream copy), no quiet hours.
+ * For Render Hobby’s 5 GB egress, set RECORD_ENCODE=1 and RECORD_IDLE_SECS=600.
  *
  * Usage: npm run record:24x7
- *        Docker / Render worker: see Dockerfile + render.yaml
- * Env:   RECORD_SEGMENT_SECS (default 60)
+ *        Docker / Render / Oracle: see Dockerfile + render.yaml
+ * Env:   RECORD_SEGMENT_SECS (default 30)
+ *        RECORD_IDLE_SECS (default 0) — wait between clips (0 = continuous)
+ *        RECORD_ENCODE (default 0) — 1 = re-encode smaller; 0 = source quality
+ *        RECORD_VIDEO_BITRATE / RECORD_MAX_WIDTH — only used when RECORD_ENCODE=1
  *        RECORD_RETENTION_HOURS (default 24)
  *        RECORD_TZ (default America/New_York)
- *        RECORD_QUIET_START (default 20:00)  — stop recording at this time
- *        RECORD_QUIET_END (default 06:01)    — resume recording at this time
+ *        RECORD_QUIET_START / RECORD_QUIET_END — equal times = off (24/7)
  */
 require("dotenv").config();
 
@@ -29,8 +31,16 @@ const { deleteOlderThan } = require("../lib/recordings");
 
 const SEGMENT_SECS = Math.max(
   10,
-  Number(process.env.RECORD_SEGMENT_SECS || 60)
+  Number(process.env.RECORD_SEGMENT_SECS || 30)
 );
+/** Seconds to wait after each successful upload before the next clip. */
+const IDLE_SECS = Math.max(0, Number(process.env.RECORD_IDLE_SECS || 0));
+/** false = stream-copy (full camera quality). true = compress for small egress. */
+const ENCODE =
+  process.env.RECORD_ENCODE === "1" ||
+  String(process.env.RECORD_ENCODE || "").toLowerCase() === "true";
+const VIDEO_BITRATE = String(process.env.RECORD_VIDEO_BITRATE || "2500k");
+const MAX_WIDTH = Math.max(320, Number(process.env.RECORD_MAX_WIDTH || 1280));
 const RETENTION_HOURS = Math.max(
   1,
   Number(process.env.RECORD_RETENTION_HOURS || 24)
@@ -45,8 +55,10 @@ const PRUNE_INTERVAL_MS = Math.max(
   Number(process.env.RECORD_PRUNE_INTERVAL_MS || 60 * 60 * 1000)
 );
 const RECORD_TZ = process.env.RECORD_TZ || "America/New_York";
-const QUIET_START = parseHm(process.env.RECORD_QUIET_START || "20:00");
-const QUIET_END = parseHm(process.env.RECORD_QUIET_END || "06:01");
+/** Set start === end (default) to disable quiet hours and record 24/7. */
+const QUIET_START = parseHm(process.env.RECORD_QUIET_START || "00:00");
+const QUIET_END = parseHm(process.env.RECORD_QUIET_END || "00:00");
+const QUIET_DISABLED = QUIET_START === QUIET_END;
 
 /** @type {import("child_process").ChildProcess | null} */
 let activeFfmpeg = null;
@@ -93,8 +105,8 @@ function getLocalMinutes(date = new Date()) {
  * Recording is off while local time is inside [start, end).
  */
 function isQuietHours(date = new Date()) {
+  if (QUIET_DISABLED) return false;
   const now = getLocalMinutes(date);
-  if (QUIET_START === QUIET_END) return false;
   if (QUIET_START < QUIET_END) {
     return now >= QUIET_START && now < QUIET_END;
   }
@@ -139,8 +151,15 @@ async function waitUntilRecordingWindow() {
   }
 }
 
+function videoBufsize(bitrate) {
+  const n = Number(String(bitrate).replace(/k$/i, ""));
+  return `${Math.max(200, Math.round((Number.isFinite(n) ? n : 2500) * 2))}k`;
+}
+
 function runFfmpeg(url, outFile, seconds) {
   return new Promise((resolve, reject) => {
+    // Default: stream-copy = full camera quality, low CPU, smooth on small VMs.
+    // RECORD_ENCODE=1 re-encodes smaller for tight bandwidth (e.g. Render Hobby).
     const args = [
       "-hide_banner",
       "-loglevel",
@@ -152,14 +171,30 @@ function runFfmpeg(url, outFile, seconds) {
       url,
       "-t",
       String(seconds),
-      "-c",
-      "copy",
-      "-bsf:a",
-      "aac_adtstoasc",
-      "-movflags",
-      "+faststart",
-      outFile,
     ];
+    if (ENCODE) {
+      args.push(
+        "-an",
+        "-vf",
+        `scale=min(${MAX_WIDTH}\\,iw):-2`,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-b:v",
+        VIDEO_BITRATE,
+        "-maxrate",
+        VIDEO_BITRATE,
+        "-bufsize",
+        videoBufsize(VIDEO_BITRATE),
+        "-pix_fmt",
+        "yuv420p"
+      );
+    } else {
+      args.push("-c", "copy", "-bsf:a", "aac_adtstoasc");
+    }
+    args.push("-movflags", "+faststart", outFile);
+
     const child = spawn("ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
     activeFfmpeg = child;
     let err = "";
@@ -223,13 +258,19 @@ function listenHealthServer() {
           cameraId: CAMERA_ID,
           imageId: IMAGE_ID,
           segmentSecs: SEGMENT_SECS,
+          idleSecs: IDLE_SECS,
+          encode: ENCODE,
+          videoBitrate: ENCODE ? VIDEO_BITRATE : "source",
+          maxWidth: ENCODE ? MAX_WIDTH : "source",
           retentionHours: RETENTION_HOURS,
           timezone: RECORD_TZ,
-          quietHours: {
-            start: formatHm(QUIET_START),
-            end: formatHm(QUIET_END),
-            active: quiet,
-          },
+          quietHours: QUIET_DISABLED
+            ? null
+            : {
+                start: formatHm(QUIET_START),
+                end: formatHm(QUIET_END),
+                active: quiet,
+              },
           segmentsUploaded,
           lastSegmentAt,
           lastPruneAt,
@@ -332,8 +373,14 @@ async function main() {
   // Bind PORT first so Render marks the deploy as live, then record.
   await listenHealthServer();
 
+  const quality = ENCODE
+    ? `${VIDEO_BITRATE}@≤${MAX_WIDTH}px`
+    : "source-quality copy";
+  const quietLabel = QUIET_DISABLED
+    ? "24/7 (no quiet hours)"
+    : `quiet ${formatHm(QUIET_START)}–${formatHm(QUIET_END)} ${RECORD_TZ}`;
   log(
-    `Recorder starting (camera ${CAMERA_ID}, view ${IMAGE_ID}, segment ${SEGMENT_SECS}s, retain ${RETENTION_HOURS}h, prune every ${Math.round(PRUNE_INTERVAL_MS / 60000)}m, quiet ${formatHm(QUIET_START)}–${formatHm(QUIET_END)} ${RECORD_TZ})`
+    `Recorder starting (camera ${CAMERA_ID}, view ${IMAGE_ID}, segment ${SEGMENT_SECS}s, idle ${IDLE_SECS}s, ${quality}, retain ${RETENTION_HOURS}h, prune every ${Math.round(PRUNE_INTERVAL_MS / 60000)}m, ${quietLabel})`
   );
   getServiceClient();
   await pruneOldRecordings();
@@ -349,6 +396,14 @@ async function main() {
       await waitUntilRecordingWindow();
       if (shuttingDown) break;
       await recordOneSegment();
+      if (IDLE_SECS > 0 && !shuttingDown) {
+        log(`Idle ${IDLE_SECS}s before next clip (bandwidth saver)`);
+        const idleUntil = Date.now() + IDLE_SECS * 1000;
+        while (!shuttingDown && Date.now() < idleUntil) {
+          if (isQuietHours()) break;
+          await sleep(Math.min(QUIET_POLL_MS, idleUntil - Date.now()));
+        }
+      }
     } catch (err) {
       if (shuttingDown) break;
       lastError = String(err.message || err);
