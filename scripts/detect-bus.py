@@ -130,16 +130,18 @@ def notify_discord(frame: np.ndarray, conf: float, yratio: float, webhook: str) 
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not ok:
         raise RuntimeError("jpeg encode failed")
-    files = {
-        "file": ("bus.jpg", buf.tobytes(), "image/jpeg"),
-    }
     content = (
         f"🟡 **School bus detected!**\n"
         f"Camera `{IMAGE_ID}` · confidence `{conf:.0%}` · yellow `{yratio:.0%}`\n"
         f"<t:{int(time.time())}:F>"
     )
-    data = {"content": content}
-    r = requests.post(webhook, data=data, files=files, timeout=30)
+    # Discord requires payload_json when attaching files
+    r = requests.post(
+        webhook,
+        data={"payload_json": json.dumps({"content": content})},
+        files={"files[0]": ("bus.jpg", buf.tobytes(), "image/jpeg")},
+        timeout=30,
+    )
     if r.status_code >= 300:
         raise RuntimeError(f"Discord webhook HTTP {r.status_code}: {r.text[:200]}")
 
@@ -160,9 +162,11 @@ def main() -> int:
 
     prev_gray = None
     last_alert = 0.0
+    last_heartbeat = 0.0
     hls_url = None
     hls_fetched_at = 0.0
     failures = 0
+    frames_ok = 0
 
     while True:
         loop_start = time.time()
@@ -181,8 +185,13 @@ def main() -> int:
                 time.sleep(min(30, 2 + failures))
                 continue
             failures = 0
+            frames_ok += 1
 
             score, prev_gray = motion_score(prev_gray, frame)
+            if time.time() - last_heartbeat >= 60:
+                log(f"Heartbeat frames={frames_ok} motion={score:.1f}")
+                last_heartbeat = time.time()
+
             if score < MOTION_THR:
                 # quiet road
                 pass
