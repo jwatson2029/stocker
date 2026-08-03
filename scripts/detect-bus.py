@@ -18,7 +18,7 @@ Env:
   DETECT_PEOPLE (default 1)
   DETECT_PERSON_MIN_AREA (default 0.001)
   DETECT_WHITE_CARS (default 0)
-  YOLO_MODEL (default yolov8n.pt)
+  YOLO_MODEL (default yolo26n.pt)
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ DETECT_WHITE_CARS = os.environ.get("DETECT_WHITE_CARS", "0").strip() not in (
     "False",
     "no",
 )
-MODEL_NAME = os.environ.get("YOLO_MODEL", "yolov8n.pt")
+MODEL_NAME = os.environ.get("YOLO_MODEL", "yolo26n.pt")
 # COCO ids — distant school buses are often "car"; close ones "bus"/"truck"
 CLS_PERSON, CLS_CAR, CLS_BUS, CLS_TRUCK = 0, 2, 5, 7
 UA = "stocker-yolo/1.0"
