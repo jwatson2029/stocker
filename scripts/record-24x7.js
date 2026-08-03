@@ -28,6 +28,7 @@ const path = require("path");
 const { getSignedVideoUrl, CAMERA_ID, IMAGE_ID } = require("../lib/ga511");
 const { getServiceClient, BUCKET } = require("../lib/supabase");
 const { deleteOlderThan } = require("../lib/recordings");
+const { estDateTimeStamp } = require("../lib/time");
 
 const SEGMENT_SECS = Math.max(
   10,
@@ -298,9 +299,10 @@ function listenHealthServer() {
 
 async function uploadSegment(filePath, durationMs) {
   const supabase = getServiceClient();
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const filename = `FORS-0021_${stamp}_24x7.mp4`;
-  const storagePath = `${CAMERA_ID || "camera"}/${stamp}_${filename}`;
+  // e.g. 2026-08-03_13-19-45.mp4 (America/New_York)
+  const stamp = estDateTimeStamp();
+  const filename = `${stamp}.mp4`;
+  const storagePath = `${CAMERA_ID || "camera"}/${filename}`;
   const body = fs.readFileSync(filePath);
   const size = body.length;
 
