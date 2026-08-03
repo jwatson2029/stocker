@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-YOLOv8n school-bus detector → Discord.
+YOLOv8n school-bus + people detector → Discord.
 
-COCO car/bus/truck detections, then a yellow color filter so only school buses
-alert (city buses / white cars do not).
+COCO car/bus/truck (+ person) detections; yellow filter for school buses.
 
 Env:
   IMAGE_ID, DISCORD_WEBHOOK_URL
@@ -12,6 +11,8 @@ Env:
   DETECT_MOTION_THRESHOLD (default 5)
   DETECT_CONF (default 0.35)
   DETECT_YELLOW_MIN (default 0.08)  # ROI fraction that must be school-bus yellow
+  DETECT_PEOPLE (default 1)
+  DETECT_PERSON_MIN_AREA (default 0.001)  # min box area as fraction of frame
   DETECT_WHITE_CARS (default 0)     # temporary debug only
   YOLO_MODEL (default yolov8n.pt)
 """
@@ -35,6 +36,13 @@ COOLDOWN = max(15.0, float(os.environ.get("DETECT_COOLDOWN_SECS", "60")))
 MOTION_THR = float(os.environ.get("DETECT_MOTION_THRESHOLD", "5"))
 CONF = float(os.environ.get("DETECT_CONF", "0.35"))
 YELLOW_MIN = float(os.environ.get("DETECT_YELLOW_MIN", "0.08"))
+PERSON_MIN_AREA = float(os.environ.get("DETECT_PERSON_MIN_AREA", "0.001"))
+DETECT_PEOPLE = os.environ.get("DETECT_PEOPLE", "1").strip() not in (
+    "0",
+    "false",
+    "False",
+    "no",
+)
 DETECT_WHITE_CARS = os.environ.get("DETECT_WHITE_CARS", "0").strip() not in (
     "0",
     "false",
@@ -43,7 +51,7 @@ DETECT_WHITE_CARS = os.environ.get("DETECT_WHITE_CARS", "0").strip() not in (
 )
 MODEL_NAME = os.environ.get("YOLO_MODEL", "yolov8n.pt")
 # COCO ids — school buses are usually "bus", sometimes "truck"
-CLS_CAR, CLS_BUS, CLS_TRUCK = 2, 5, 7
+CLS_PERSON, CLS_CAR, CLS_BUS, CLS_TRUCK = 0, 2, 5, 7
 UA = "stocker-yolo/1.0"
 
 
@@ -148,10 +156,14 @@ def notify_discord(frame, title: str, filename: str, meta: str):
 def main() -> int:
     from ultralytics import YOLO
 
+    targets = ["school buses"]
+    if DETECT_PEOPLE:
+        targets.append("people")
     log(
-        f"School-bus detector starting (model={MODEL_NAME}, image={IMAGE_ID}, "
+        f"Detector starting (model={MODEL_NAME}, image={IMAGE_ID}, "
         f"every {INTERVAL}s, motion≥{MOTION_THR}, conf≥{CONF}, "
-        f"yellow≥{YELLOW_MIN}, white_cars={'on' if DETECT_WHITE_CARS else 'off'}, "
+        f"yellow≥{YELLOW_MIN}, people={'on' if DETECT_PEOPLE else 'off'}, "
+        f"white_cars={'on' if DETECT_WHITE_CARS else 'off'}, "
         f"webhook={'yes' if WEBHOOK else 'no'})"
     )
     model = YOLO(MODEL_NAME)
@@ -163,8 +175,8 @@ def main() -> int:
                 WEBHOOK,
                 json={
                     "content": (
-                        f"✅ School bus detector online (`{MODEL_NAME}`) for camera "
-                        f"`{IMAGE_ID}` — yellow school buses only."
+                        f"✅ Detector online (`{MODEL_NAME}`) for camera "
+                        f"`{IMAGE_ID}` — {', '.join(targets)}."
                     )
                 },
                 timeout=20,
@@ -175,13 +187,15 @@ def main() -> int:
 
     grabber = StreamGrabber()
     prev_gray = None
-    last_alert = {"bus": 0.0, "white_car": 0.0}
+    last_alert = {"bus": 0.0, "person": 0.0, "white_car": 0.0}
     last_heartbeat = 0.0
     hls_url = None
     hls_at = 0.0
     frames_ok = 0
     failures = 0
     classes = [CLS_CAR, CLS_BUS, CLS_TRUCK]
+    if DETECT_PEOPLE:
+        classes = [CLS_PERSON, *classes]
 
     while True:
         t0 = time.time()
@@ -221,15 +235,21 @@ def main() -> int:
             )
             boxes = results[0].boxes
             best_bus = None
+            best_person = None
             best_white = None
+            fh, fw = frame.shape[:2]
+            frame_area = float(fh * fw)
 
             for box in boxes:
                 cls_id = int(box.cls[0])
                 conf = float(box.conf[0])
                 xyxy = box.xyxy[0].tolist()
-                name = {CLS_CAR: "car", CLS_BUS: "bus", CLS_TRUCK: "truck"}.get(
-                    cls_id, str(cls_id)
-                )
+                name = {
+                    CLS_PERSON: "person",
+                    CLS_CAR: "car",
+                    CLS_BUS: "bus",
+                    CLS_TRUCK: "truck",
+                }.get(cls_id, str(cls_id))
 
                 # School bus: yellow body on bus/truck (YOLO sometimes says truck)
                 if cls_id in (CLS_BUS, CLS_TRUCK):
@@ -238,6 +258,14 @@ def main() -> int:
                         key = conf + y
                         if best_bus is None or key > best_bus[0]:
                             best_bus = (key, conf, y, xyxy, name)
+
+                if DETECT_PEOPLE and cls_id == CLS_PERSON:
+                    x1, y1, x2, y2 = xyxy
+                    area = max(0.0, (x2 - x1) * (y2 - y1)) / frame_area
+                    if area >= PERSON_MIN_AREA:
+                        key = conf + area
+                        if best_person is None or key > best_person[0]:
+                            best_person = (key, conf, area, xyxy)
 
                 if DETECT_WHITE_CARS and cls_id in (CLS_CAR, CLS_TRUCK):
                     w = color_ratio(frame, xyxy, "white")
@@ -274,6 +302,33 @@ def main() -> int:
                 else:
                     log("School-bus hit during cooldown")
 
+            if best_person:
+                _, conf, area, xyxy = best_person
+                if now - last_alert["person"] >= COOLDOWN:
+                    annotated = frame.copy()
+                    x1, y1, x2, y2 = [int(v) for v in xyxy]
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), (80, 180, 255), 3)
+                    cv2.putText(
+                        annotated,
+                        f"person {conf:.0%}",
+                        (x1, max(24, y1 - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (80, 180, 255),
+                        2,
+                    )
+                    log(f"ALERT person conf={conf:.2f} area={area:.4f}")
+                    if WEBHOOK:
+                        notify_discord(
+                            annotated,
+                            "🚶 **Person detected!**",
+                            "person.jpg",
+                            f"YOLO `person` · conf `{conf:.0%}` · area `{area:.2%}`",
+                        )
+                    last_alert["person"] = now
+                else:
+                    log("Person hit during cooldown")
+
             if best_white:
                 _, conf, w, xyxy, name = best_white
                 if now - last_alert["white_car"] >= COOLDOWN:
@@ -302,7 +357,7 @@ def main() -> int:
                     log("White-car hit during cooldown")
 
             if boxes is None or len(boxes) == 0:
-                log(f"Motion {score:.1f} — YOLO found no car/bus/truck")
+                log(f"Motion {score:.1f} — YOLO found nothing")
 
         except KeyboardInterrupt:
             grabber.close()
