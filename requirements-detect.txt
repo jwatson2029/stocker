@@ -1,5 +1,3 @@
-# torch/torchvision installed separately (CPU wheels) in Dockerfile.detect
-ultralytics>=8.3.0
-opencv-python-headless>=4.8.0
-numpy>=1.24.0
-requests>=2.31.0
+opencv-python-headless==4.10.0.84
+numpy==2.1.3
+requests==2.32.3
