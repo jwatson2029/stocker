@@ -8,12 +8,12 @@ yellow so ordinary vehicles don't alert).
 
 Env:
   IMAGE_ID, DISCORD_WEBHOOK_URL
-  DETECT_INTERVAL_SECS (default 0.5)
+  DETECT_INTERVAL_SECS (default 0.15)
   DETECT_COOLDOWN_SECS (default 60)
   DETECT_MOTION_THRESHOLD (default 3)
-  DETECT_FORCE_YOLO_SECS (default 2.5)  # run YOLO even if motion is low
+  DETECT_FORCE_YOLO_SECS (default 0.8)  # run YOLO even if motion is low
   DETECT_CONF (default 0.22)
-  DETECT_IMGSZ (default 960)  # higher = better small/far/edge recall
+  DETECT_IMGSZ (default 800)  # higher = better small/far; lower = faster checks
   DETECT_YELLOW_MIN (default 0.12)  # base yellow fraction (bus class)
   DETECT_PEOPLE (default 1)
   DETECT_PERSON_MIN_AREA (default 0.001)
@@ -35,12 +35,12 @@ import requests
 
 IMAGE_ID = os.environ.get("IMAGE_ID", "19494")
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
-INTERVAL = max(0.1, float(os.environ.get("DETECT_INTERVAL_SECS", "0.5")))
+INTERVAL = max(0.05, float(os.environ.get("DETECT_INTERVAL_SECS", "0.15")))
 COOLDOWN = max(15.0, float(os.environ.get("DETECT_COOLDOWN_SECS", "60")))
 MOTION_THR = float(os.environ.get("DETECT_MOTION_THRESHOLD", "3"))
-FORCE_YOLO_SECS = max(0.5, float(os.environ.get("DETECT_FORCE_YOLO_SECS", "2.5")))
+FORCE_YOLO_SECS = max(0.25, float(os.environ.get("DETECT_FORCE_YOLO_SECS", "0.8")))
 CONF = float(os.environ.get("DETECT_CONF", "0.22"))
-IMGSZ = int(os.environ.get("DETECT_IMGSZ", "960"))
+IMGSZ = int(os.environ.get("DETECT_IMGSZ", "800"))
 YELLOW_MIN = float(os.environ.get("DETECT_YELLOW_MIN", "0.12"))
 PERSON_MIN_AREA = float(os.environ.get("DETECT_PERSON_MIN_AREA", "0.001"))
 DETECT_PEOPLE = os.environ.get("DETECT_PEOPLE", "1").strip() not in (
@@ -104,9 +104,9 @@ class StreamGrabber:
             if not self.open(hls_url):
                 return None
         assert self.cap is not None
-        ok, frame = False, None
-        for _ in range(2):
-            ok, frame = self.cap.read()
+        # Drain one stale buffered frame, then take the newest (keeps latency low).
+        self.cap.grab()
+        ok, frame = self.cap.read()
         if ok and frame is not None and frame.size:
             return frame
         if not self.open(hls_url):
