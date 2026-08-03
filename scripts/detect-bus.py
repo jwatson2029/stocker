@@ -6,12 +6,13 @@ Flow: grab HLS frame → motion gate → yellow blob shaped like a bus → Disco
 
 Env:
   IMAGE_ID, DISCORD_WEBHOOK_URL
-  DETECT_INTERVAL_SECS (default 3)
-  DETECT_COOLDOWN_SECS (default 120)
-  DETECT_MOTION_THRESHOLD (default 10)
+  DETECT_INTERVAL_SECS (default 0.1)
+  DETECT_COOLDOWN_SECS (default 60)
+  DETECT_MOTION_THRESHOLD (default 6)
   DETECT_MIN_AREA (default 0.01)   # fraction of frame
   DETECT_MAX_AREA (default 0.55)
   DETECT_MIN_YELLOW (default 0.25) # yellow fraction inside blob box
+  DETECT_WHITE_CARS (default 1)    # temporary white-car alerts
 """
 
 from __future__ import annotations
@@ -31,9 +32,9 @@ import requests
 
 IMAGE_ID = os.environ.get("IMAGE_ID", "19494")
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
-INTERVAL = max(1.0, float(os.environ.get("DETECT_INTERVAL_SECS", "3")))
-COOLDOWN = max(30.0, float(os.environ.get("DETECT_COOLDOWN_SECS", "120")))
-MOTION_THR = float(os.environ.get("DETECT_MOTION_THRESHOLD", "10"))
+INTERVAL = max(0.05, float(os.environ.get("DETECT_INTERVAL_SECS", "0.1")))
+COOLDOWN = max(15.0, float(os.environ.get("DETECT_COOLDOWN_SECS", "60")))
+MOTION_THR = float(os.environ.get("DETECT_MOTION_THRESHOLD", "6"))
 MIN_AREA = float(os.environ.get("DETECT_MIN_AREA", "0.01"))
 MAX_AREA = float(os.environ.get("DETECT_MAX_AREA", "0.55"))
 DETECT_WHITE_CARS = os.environ.get("DETECT_WHITE_CARS", "1").strip() not in (
@@ -69,41 +70,86 @@ def get_hls_url(image_id: str) -> str:
     return str(raw).strip().strip('"')
 
 
-def grab_frame(hls_url: str) -> np.ndarray | None:
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        out = tmp.name
-    try:
-        proc = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-rw_timeout",
-                "15000000",
-                "-i",
-                hls_url,
-                "-frames:v",
-                "1",
-                "-q:v",
-                "3",
-                out,
-            ],
-            timeout=45,
-            capture_output=True,
-        )
-        if proc.returncode != 0 or not Path(out).exists() or Path(out).stat().st_size < 100:
-            return None
-        frame = cv2.imread(out)
-        return frame
-    except Exception:
-        return None
-    finally:
+class StreamGrabber:
+    """Keep HLS open so we can sample ~every 0.1s instead of relaunching ffmpeg."""
+
+    def __init__(self):
+        self.cap = None
+        self.url = None
+
+    def close(self):
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+            self.url = None
+
+    def open(self, hls_url: str) -> bool:
+        self.close()
+        cap = cv2.VideoCapture(hls_url, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if not cap.isOpened():
+            return False
+        self.cap = cap
+        self.url = hls_url
+        return True
+
+    def read(self, hls_url: str) -> np.ndarray | None:
+        if self.cap is None or self.url != hls_url:
+            if not self.open(hls_url):
+                return self._ffmpeg_once(hls_url)
+        assert self.cap is not None
+        # Drop a couple buffered frames so we aren't stuck on old data
+        ok, frame = False, None
+        for _ in range(3):
+            ok, frame = self.cap.read()
+        if ok and frame is not None and frame.size:
+            return frame
+        # reconnect once
+        if not self.open(hls_url):
+            return self._ffmpeg_once(hls_url)
+        ok, frame = self.cap.read()
+        if ok and frame is not None and frame.size:
+            return frame
+        return self._ffmpeg_once(hls_url)
+
+    @staticmethod
+    def _ffmpeg_once(hls_url: str) -> np.ndarray | None:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            out = tmp.name
         try:
-            Path(out).unlink(missing_ok=True)
+            proc = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-rw_timeout",
+                    "15000000",
+                    "-i",
+                    hls_url,
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "3",
+                    out,
+                ],
+                timeout=45,
+                capture_output=True,
+            )
+            if proc.returncode != 0 or not Path(out).exists() or Path(out).stat().st_size < 100:
+                return None
+            return cv2.imread(out)
         except Exception:
-            pass
+            return None
+        finally:
+            try:
+                Path(out).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def motion_score(prev_gray: np.ndarray | None, frame: np.ndarray) -> tuple[float, np.ndarray]:
@@ -297,6 +343,7 @@ def main() -> int:
     hls_at = 0.0
     frames_ok = 0
     failures = 0
+    grabber = StreamGrabber()
 
     while True:
         t0 = time.time()
@@ -304,14 +351,16 @@ def main() -> int:
             if not hls_url or time.time() - hls_at > 240:
                 hls_url = get_hls_url(IMAGE_ID)
                 hls_at = time.time()
+                grabber.close()
                 log("Refreshed HLS URL")
 
-            frame = grab_frame(hls_url)
+            frame = grabber.read(hls_url)
             if frame is None:
                 failures += 1
                 log("Frame grab failed")
                 hls_url = None
-                time.sleep(min(20, 2 + failures))
+                grabber.close()
+                time.sleep(min(5, 0.5 + failures * 0.2))
                 continue
             failures = 0
             frames_ok += 1
@@ -352,13 +401,16 @@ def main() -> int:
 
         except KeyboardInterrupt:
             log("Shutting down")
+            grabber.close()
             return 0
         except Exception as e:
             log(f"Loop error: {e}")
             hls_url = None
-            time.sleep(4)
+            grabber.close()
+            time.sleep(1)
 
-        time.sleep(max(0.2, INTERVAL - (time.time() - t0)))
+        elapsed = time.time() - t0
+        time.sleep(max(0.0, INTERVAL - elapsed))
 
 
 if __name__ == "__main__":
