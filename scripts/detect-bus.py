@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-YOLOv8n vehicle detector → Discord.
+YOLOv8n school-bus detector → Discord.
 
-Uses a real object-detection model (COCO): car / bus / truck, then color filters
-for school-bus yellow and (temporary) white cars.
+COCO car/bus/truck detections, then a yellow color filter so only school buses
+alert (city buses / white cars do not).
 
 Env:
   IMAGE_ID, DISCORD_WEBHOOK_URL
@@ -11,7 +11,8 @@ Env:
   DETECT_COOLDOWN_SECS (default 60)
   DETECT_MOTION_THRESHOLD (default 5)
   DETECT_CONF (default 0.35)
-  DETECT_WHITE_CARS (default 1)
+  DETECT_YELLOW_MIN (default 0.08)  # ROI fraction that must be school-bus yellow
+  DETECT_WHITE_CARS (default 0)     # temporary debug only
   YOLO_MODEL (default yolov8n.pt)
 """
 
@@ -33,14 +34,15 @@ INTERVAL = max(0.1, float(os.environ.get("DETECT_INTERVAL_SECS", "0.5")))
 COOLDOWN = max(15.0, float(os.environ.get("DETECT_COOLDOWN_SECS", "60")))
 MOTION_THR = float(os.environ.get("DETECT_MOTION_THRESHOLD", "5"))
 CONF = float(os.environ.get("DETECT_CONF", "0.35"))
-DETECT_WHITE_CARS = os.environ.get("DETECT_WHITE_CARS", "1").strip() not in (
+YELLOW_MIN = float(os.environ.get("DETECT_YELLOW_MIN", "0.08"))
+DETECT_WHITE_CARS = os.environ.get("DETECT_WHITE_CARS", "0").strip() not in (
     "0",
     "false",
     "False",
     "no",
 )
 MODEL_NAME = os.environ.get("YOLO_MODEL", "yolov8n.pt")
-# COCO ids
+# COCO ids — school buses are usually "bus", sometimes "truck"
 CLS_CAR, CLS_BUS, CLS_TRUCK = 2, 5, 7
 UA = "stocker-yolo/1.0"
 
@@ -121,7 +123,8 @@ def color_ratio(frame, xyxy, kind: str) -> float:
     roi = frame[y1:y2, x1:x2]
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     if kind == "yellow":
-        mask = cv2.inRange(hsv, (12, 80, 80), (40, 255, 255))
+        # School-bus chrome yellow / amber
+        mask = cv2.inRange(hsv, (8, 60, 70), (42, 255, 255))
     else:  # white
         mask = cv2.inRange(hsv, (0, 0, 170), (179, 60, 255))
     return float(np.count_nonzero(mask)) / float(mask.size)
@@ -146,9 +149,9 @@ def main() -> int:
     from ultralytics import YOLO
 
     log(
-        f"YOLO detector starting (model={MODEL_NAME}, image={IMAGE_ID}, "
+        f"School-bus detector starting (model={MODEL_NAME}, image={IMAGE_ID}, "
         f"every {INTERVAL}s, motion≥{MOTION_THR}, conf≥{CONF}, "
-        f"white_cars={'on' if DETECT_WHITE_CARS else 'off'}, "
+        f"yellow≥{YELLOW_MIN}, white_cars={'on' if DETECT_WHITE_CARS else 'off'}, "
         f"webhook={'yes' if WEBHOOK else 'no'})"
     )
     model = YOLO(MODEL_NAME)
@@ -156,13 +159,12 @@ def main() -> int:
 
     if WEBHOOK:
         try:
-            extra = " + white cars" if DETECT_WHITE_CARS else ""
             r = requests.post(
                 WEBHOOK,
                 json={
                     "content": (
-                        f"✅ YOLO detector online (`{MODEL_NAME}`) for camera "
-                        f"`{IMAGE_ID}` — school buses{extra}."
+                        f"✅ School bus detector online (`{MODEL_NAME}`) for camera "
+                        f"`{IMAGE_ID}` — yellow school buses only."
                     )
                 },
                 timeout=20,
@@ -229,10 +231,10 @@ def main() -> int:
                     cls_id, str(cls_id)
                 )
 
-                if cls_id == CLS_BUS:
+                # School bus: yellow body on bus/truck (YOLO sometimes says truck)
+                if cls_id in (CLS_BUS, CLS_TRUCK):
                     y = color_ratio(frame, xyxy, "yellow")
-                    # Prefer yellow school buses; still allow plain bus with lower yellow
-                    if y >= 0.08 or conf >= 0.55:
+                    if y >= YELLOW_MIN:
                         key = conf + y
                         if best_bus is None or key > best_bus[0]:
                             best_bus = (key, conf, y, xyxy, name)
@@ -260,17 +262,17 @@ def main() -> int:
                         (0, 200, 255),
                         2,
                     )
-                    log(f"ALERT bus conf={conf:.2f} yellow={y:.2f}")
+                    log(f"ALERT school bus conf={conf:.2f} yellow={y:.2f} cls={name}")
                     if WEBHOOK:
                         notify_discord(
                             annotated,
-                            "🟡 **School bus detected!** (YOLO)",
+                            "🟡 **School bus detected!**",
                             "bus.jpg",
                             f"YOLO `{name}` · conf `{conf:.0%}` · yellow `{y:.0%}`",
                         )
                     last_alert["bus"] = now
                 else:
-                    log("Bus hit during cooldown")
+                    log("School-bus hit during cooldown")
 
             if best_white:
                 _, conf, w, xyxy, name = best_white
@@ -291,7 +293,7 @@ def main() -> int:
                     if WEBHOOK:
                         notify_discord(
                             annotated,
-                            "⚪ **White car detected!** (YOLO, temporary)",
+                            "⚪ **White car detected!** (debug)",
                             "white-car.jpg",
                             f"YOLO `{name}` · conf `{conf:.0%}` · white `{w:.0%}`",
                         )
