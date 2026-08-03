@@ -10,9 +10,13 @@ RUN apt-get update \
 
 WORKDIR /app
 
+# CPU-only torch (no CUDA) — fits Always Free disk; aarch64/x86_64 both OK
 COPY requirements-detect.txt ./
-RUN pip install --no-cache-dir -r requirements-detect.txt \
-  && python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+RUN pip install --no-cache-dir --upgrade pip \
+  && pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu \
+  && pip install --no-cache-dir -r requirements-detect.txt \
+  && python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')" \
+  && rm -rf /root/.cache/pip
 
 COPY scripts/detect-bus.py ./scripts/detect-bus.py
 
