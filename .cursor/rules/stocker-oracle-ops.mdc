@@ -16,9 +16,10 @@ alwaysApply: true
 
 ## Containers (Podman on VM)
 - `stocker-recorder` — 24/7 30s source-quality clips → Supabase; `--restart=always`
-- `stocker-detect` — YOLO26n school buses (yellow) + people → Discord; **must** `--network=host --env-file ~/stocker/.env`
+- `stocker-detect` — YOLO26s school buses (yellow) + people → Discord; **must** `--network=host --env-file ~/stocker/.env`
 - Code lives in `~/stocker` on the VM; inject script updates with `podman cp` (bind mounts hit SELinux permission denials)
-- Env highlights: `IMAGE_ID=19494`, `DETECT_PEOPLE=1`, `DETECT_WHITE_CARS=0`, `DETECT_YELLOW_MIN=0.12`, `DETECT_CONF=0.22`, `DETECT_IMGSZ=800`, `YOLO_MODEL=yolo26n.pt`, Discord webhook
+- Env highlights: `IMAGE_ID=19494`, `DETECT_PEOPLE=1`, `DETECT_WHITE_CARS=0`, `DETECT_YELLOW_MIN=0.12`, `DETECT_CONF=0.22`, `DETECT_IMGSZ=800`, `YOLO_MODEL=yolo26s.pt`, Discord webhook
+- Shape: **VM.Standard.A1.Flex 2 OCPU / 12 GB** (Always Free max for A1)
 
 ## Supabase network restrictions
 - DB IP allowlist applies only to **direct Postgres** and **connection pooler**, not PostgREST/Storage HTTPS
