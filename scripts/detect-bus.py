@@ -36,7 +36,14 @@ COOLDOWN = max(30.0, float(os.environ.get("DETECT_COOLDOWN_SECS", "120")))
 MOTION_THR = float(os.environ.get("DETECT_MOTION_THRESHOLD", "10"))
 MIN_AREA = float(os.environ.get("DETECT_MIN_AREA", "0.01"))
 MAX_AREA = float(os.environ.get("DETECT_MAX_AREA", "0.55"))
+DETECT_RED_CARS = os.environ.get("DETECT_RED_CARS", "1").strip() not in (
+    "0",
+    "false",
+    "False",
+    "no",
+)
 MIN_YELLOW = float(os.environ.get("DETECT_MIN_YELLOW", "0.25"))
+MIN_RED = float(os.environ.get("DETECT_MIN_RED", "0.22"))
 UA = "stocker-detect-lite/1.0"
 
 
@@ -107,11 +114,30 @@ def yellow_mask(frame: np.ndarray) -> np.ndarray:
     return cv2.inRange(hsv, (12, 90, 90), (40, 255, 255))
 
 
-def find_school_bus(frame: np.ndarray):
-    """Return (score, x1,y1,x2,y2, yellow_ratio) or None."""
+def red_mask(frame: np.ndarray) -> np.ndarray:
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    # Red wraps around hue 0
+    low = cv2.inRange(hsv, (0, 100, 70), (10, 255, 255))
+    high = cv2.inRange(hsv, (170, 100, 70), (179, 255, 255))
+    return cv2.bitwise_or(low, high)
+
+
+def find_color_blob(
+    frame: np.ndarray,
+    mask: np.ndarray,
+    *,
+    min_fill: float,
+    aspect_min: float,
+    aspect_max: float,
+    target_aspect: float,
+    min_area: float | None = None,
+    max_area: float | None = None,
+):
+    """Return (score, x1,y1,x2,y2, fill_ratio, aspect, area) or None."""
     h, w = frame.shape[:2]
     area_frame = float(h * w)
-    mask = yellow_mask(frame)
+    amin = MIN_AREA if min_area is None else min_area
+    amax = MAX_AREA if max_area is None else max_area
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -120,52 +146,120 @@ def find_school_bus(frame: np.ndarray):
     for cnt in contours:
         x, y, bw, bh = cv2.boundingRect(cnt)
         area = float(bw * bh) / area_frame
-        if area < MIN_AREA or area > MAX_AREA:
+        if area < amin or area > amax:
             continue
-        if bh < 12 or bw < 24:
+        if bh < 10 or bw < 18:
             continue
         aspect = bw / float(bh)
-        # buses are usually wider than tall from roadside cams
-        if aspect < 1.2 or aspect > 5.5:
+        if aspect < aspect_min or aspect > aspect_max:
             continue
         roi = mask[y : y + bh, x : x + bw]
         if roi.size == 0:
             continue
-        yratio = float(np.count_nonzero(roi)) / float(roi.size)
-        if yratio < MIN_YELLOW:
+        fill = float(np.count_nonzero(roi)) / float(roi.size)
+        if fill < min_fill:
             continue
-        # score: prefer larger, yellower, bus-like aspect (~2–3.5)
-        aspect_score = 1.0 - min(abs(aspect - 2.6) / 2.6, 1.0)
-        score = yratio * 0.55 + min(area / 0.12, 1.0) * 0.25 + aspect_score * 0.2
+        aspect_score = 1.0 - min(abs(aspect - target_aspect) / max(target_aspect, 0.1), 1.0)
+        score = fill * 0.55 + min(area / 0.12, 1.0) * 0.25 + aspect_score * 0.2
         if best is None or score > best[0]:
-            best = (score, x, y, x + bw, y + bh, yratio, aspect, area)
+            best = (score, x, y, x + bw, y + bh, fill, aspect, area)
     return best
+
+
+def find_school_bus(frame: np.ndarray):
+    return find_color_blob(
+        frame,
+        yellow_mask(frame),
+        min_fill=MIN_YELLOW,
+        aspect_min=1.2,
+        aspect_max=5.5,
+        target_aspect=2.6,
+    )
+
+
+def find_red_car(frame: np.ndarray):
+    # Cars tend to be a bit more compact than buses
+    return find_color_blob(
+        frame,
+        red_mask(frame),
+        min_fill=MIN_RED,
+        aspect_min=1.15,
+        aspect_max=3.8,
+        target_aspect=1.9,
+        min_area=max(0.006, MIN_AREA * 0.6),
+        max_area=min(0.35, MAX_AREA),
+    )
 
 
 def notify_discord(frame: np.ndarray, meta: dict) -> None:
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not ok:
         raise RuntimeError("jpeg encode failed")
+    kind = meta.get("kind", "bus")
+    if kind == "red_car":
+        title = "🔴 **Red car detected!** (temporary)"
+        color_label = "red"
+        filename = "red-car.jpg"
+    else:
+        title = "🟡 **School bus detected!**"
+        color_label = "yellow"
+        filename = "bus.jpg"
     content = (
-        f"🟡 **School bus detected!**\n"
+        f"{title}\n"
         f"Camera `{IMAGE_ID}` · score `{meta['score']:.0%}` · "
-        f"yellow `{meta['yellow']:.0%}` · size `{meta['area']:.0%}` of frame\n"
+        f"{color_label} `{meta['fill']:.0%}` · size `{meta['area']:.0%}` of frame\n"
         f"<t:{int(time.time())}:F>"
     )
     r = requests.post(
         WEBHOOK,
         data={"payload_json": json.dumps({"content": content})},
-        files={"files[0]": ("bus.jpg", buf.tobytes(), "image/jpeg")},
+        files={"files[0]": (filename, buf.tobytes(), "image/jpeg")},
         timeout=30,
     )
     if r.status_code >= 300:
         raise RuntimeError(f"Discord HTTP {r.status_code}: {r.text[:200]}")
 
 
+def emit_alert(frame, hit, kind: str, last_alert_map: dict, label: str, box_color):
+    s, x1, y1, x2, y2, fill, aspect, area = hit
+    now = time.time()
+    last = last_alert_map.get(kind, 0.0)
+    if now - last < COOLDOWN:
+        log(
+            f"{label} candidate score={s:.2f} "
+            f"(cooldown {int(COOLDOWN - (now - last))}s)"
+        )
+        return
+    annotated = frame.copy()
+    cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, 3)
+    cv2.putText(
+        annotated,
+        f"{label} {s:.0%}",
+        (x1, max(24, y1 - 8)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        box_color,
+        2,
+    )
+    log(
+        f"ALERT {kind} score={s:.2f} fill={fill:.2f} "
+        f"aspect={aspect:.1f} area={area:.3f}"
+    )
+    if WEBHOOK:
+        notify_discord(
+            annotated,
+            {"kind": kind, "score": s, "fill": fill, "area": area},
+        )
+        log("Discord notified")
+    last_alert_map[kind] = now
+
+
 def main() -> int:
     log(
         f"Lite detector starting (image {IMAGE_ID}, every {INTERVAL}s, "
-        f"motion≥{MOTION_THR}, cooldown {COOLDOWN}s, webhook={'yes' if WEBHOOK else 'no'})"
+        f"motion≥{MOTION_THR}, cooldown {COOLDOWN}s, "
+        f"red_cars={'on' if DETECT_RED_CARS else 'off'}, "
+        f"webhook={'yes' if WEBHOOK else 'no'})"
     )
     if not WEBHOOK:
         log("WARNING: DISCORD_WEBHOOK_URL missing — will only log")
@@ -173,12 +267,13 @@ def main() -> int:
     # Startup ping so you know Discord wiring works
     if WEBHOOK:
         try:
+            extra = " + temporary red-car alerts" if DETECT_RED_CARS else ""
             r = requests.post(
                 WEBHOOK,
                 json={
                     "content": (
-                        f"✅ School-bus detector online for camera `{IMAGE_ID}` "
-                        f"(lightweight / no GPU)."
+                        f"✅ Detector online for camera `{IMAGE_ID}` "
+                        f"(school bus{extra})."
                     )
                 },
                 timeout=20,
@@ -188,7 +283,7 @@ def main() -> int:
             log(f"Discord startup ping failed: {e}")
 
     prev_gray = None
-    last_alert = 0.0
+    last_alert_map: dict[str, float] = {}
     last_heartbeat = 0.0
     hls_url = None
     hls_at = 0.0
@@ -221,44 +316,31 @@ def main() -> int:
             if score < MOTION_THR:
                 pass
             else:
-                hit = find_school_bus(frame)
-                if hit:
-                    s, x1, y1, x2, y2, yratio, aspect, area = hit
-                    now = time.time()
-                    if now - last_alert < COOLDOWN:
-                        log(
-                            f"Bus candidate score={s:.2f} "
-                            f"(cooldown {int(COOLDOWN - (now - last_alert))}s)"
-                        )
-                    else:
-                        annotated = frame.copy()
-                        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 200, 255), 3)
-                        cv2.putText(
-                            annotated,
-                            f"school bus {s:.0%}",
-                            (x1, max(24, y1 - 8)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
-                            (0, 200, 255),
-                            2,
-                        )
-                        log(
-                            f"ALERT score={s:.2f} yellow={yratio:.2f} "
-                            f"aspect={aspect:.1f} area={area:.3f} motion={score:.1f}"
-                        )
-                        if WEBHOOK:
-                            notify_discord(
-                                annotated,
-                                {
-                                    "score": s,
-                                    "yellow": yratio,
-                                    "area": area,
-                                },
-                            )
-                            log("Discord notified")
-                        last_alert = now
-                else:
-                    log(f"Motion {score:.1f} — no yellow bus shape")
+                bus = find_school_bus(frame)
+                red = find_red_car(frame) if DETECT_RED_CARS else None
+                any_hit = False
+                if bus:
+                    any_hit = True
+                    emit_alert(
+                        frame,
+                        bus,
+                        "bus",
+                        last_alert_map,
+                        "school bus",
+                        (0, 200, 255),
+                    )
+                if red:
+                    any_hit = True
+                    emit_alert(
+                        frame,
+                        red,
+                        "red_car",
+                        last_alert_map,
+                        "red car",
+                        (0, 0, 255),
+                    )
+                if not any_hit:
+                    log(f"Motion {score:.1f} — no bus/red-car match")
 
         except KeyboardInterrupt:
             log("Shutting down")
