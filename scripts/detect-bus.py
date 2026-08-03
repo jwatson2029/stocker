@@ -36,14 +36,22 @@ COOLDOWN = max(30.0, float(os.environ.get("DETECT_COOLDOWN_SECS", "120")))
 MOTION_THR = float(os.environ.get("DETECT_MOTION_THRESHOLD", "10"))
 MIN_AREA = float(os.environ.get("DETECT_MIN_AREA", "0.01"))
 MAX_AREA = float(os.environ.get("DETECT_MAX_AREA", "0.55"))
-DETECT_RED_CARS = os.environ.get("DETECT_RED_CARS", "1").strip() not in (
+DETECT_WHITE_CARS = os.environ.get("DETECT_WHITE_CARS", "1").strip() not in (
     "0",
     "false",
     "False",
     "no",
 )
+# Back-compat: old env name still works if WHITE not set explicitly
+if "DETECT_WHITE_CARS" not in os.environ and os.environ.get("DETECT_RED_CARS", "").strip() in (
+    "0",
+    "false",
+    "False",
+    "no",
+):
+    DETECT_WHITE_CARS = False
 MIN_YELLOW = float(os.environ.get("DETECT_MIN_YELLOW", "0.25"))
-MIN_RED = float(os.environ.get("DETECT_MIN_RED", "0.22"))
+MIN_WHITE = float(os.environ.get("DETECT_MIN_WHITE", "0.35"))
 UA = "stocker-detect-lite/1.0"
 
 
@@ -114,12 +122,10 @@ def yellow_mask(frame: np.ndarray) -> np.ndarray:
     return cv2.inRange(hsv, (12, 90, 90), (40, 255, 255))
 
 
-def red_mask(frame: np.ndarray) -> np.ndarray:
+def white_mask(frame: np.ndarray) -> np.ndarray:
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    # Red wraps around hue 0
-    low = cv2.inRange(hsv, (0, 100, 70), (10, 255, 255))
-    high = cv2.inRange(hsv, (170, 100, 70), (179, 255, 255))
-    return cv2.bitwise_or(low, high)
+    # Low saturation + high value ≈ white / light silver
+    return cv2.inRange(hsv, (0, 0, 170), (179, 55, 255))
 
 
 def find_color_blob(
@@ -177,12 +183,12 @@ def find_school_bus(frame: np.ndarray):
     )
 
 
-def find_red_car(frame: np.ndarray):
+def find_white_car(frame: np.ndarray):
     # Cars tend to be a bit more compact than buses
     return find_color_blob(
         frame,
-        red_mask(frame),
-        min_fill=MIN_RED,
+        white_mask(frame),
+        min_fill=MIN_WHITE,
         aspect_min=1.15,
         aspect_max=3.8,
         target_aspect=1.9,
@@ -196,14 +202,16 @@ def notify_discord(frame: np.ndarray, meta: dict) -> None:
     if not ok:
         raise RuntimeError("jpeg encode failed")
     kind = meta.get("kind", "bus")
-    if kind == "red_car":
-        title = "🔴 **Red car detected!** (temporary)"
-        color_label = "red"
-        filename = "red-car.jpg"
+    if kind == "white_car":
+        title = "⚪ **White car detected!** (temporary)"
+        color_label = "white"
+        filename = "white-car.jpg"
+        box_hint = "white"
     else:
         title = "🟡 **School bus detected!**"
         color_label = "yellow"
         filename = "bus.jpg"
+        box_hint = "yellow"
     content = (
         f"{title}\n"
         f"Camera `{IMAGE_ID}` · score `{meta['score']:.0%}` · "
@@ -258,7 +266,7 @@ def main() -> int:
     log(
         f"Lite detector starting (image {IMAGE_ID}, every {INTERVAL}s, "
         f"motion≥{MOTION_THR}, cooldown {COOLDOWN}s, "
-        f"red_cars={'on' if DETECT_RED_CARS else 'off'}, "
+        f"white_cars={'on' if DETECT_WHITE_CARS else 'off'}, "
         f"webhook={'yes' if WEBHOOK else 'no'})"
     )
     if not WEBHOOK:
@@ -267,7 +275,7 @@ def main() -> int:
     # Startup ping so you know Discord wiring works
     if WEBHOOK:
         try:
-            extra = " + temporary red-car alerts" if DETECT_RED_CARS else ""
+            extra = " + temporary white-car alerts" if DETECT_WHITE_CARS else ""
             r = requests.post(
                 WEBHOOK,
                 json={
@@ -317,7 +325,7 @@ def main() -> int:
                 pass
             else:
                 bus = find_school_bus(frame)
-                red = find_red_car(frame) if DETECT_RED_CARS else None
+                white = find_white_car(frame) if DETECT_WHITE_CARS else None
                 any_hit = False
                 if bus:
                     any_hit = True
@@ -329,18 +337,18 @@ def main() -> int:
                         "school bus",
                         (0, 200, 255),
                     )
-                if red:
+                if white:
                     any_hit = True
                     emit_alert(
                         frame,
-                        red,
-                        "red_car",
+                        white,
+                        "white_car",
                         last_alert_map,
-                        "red car",
-                        (0, 0, 255),
+                        "white car",
+                        (255, 255, 255),
                     )
                 if not any_hit:
-                    log(f"Motion {score:.1f} — no bus/red-car match")
+                    log(f"Motion {score:.1f} — no bus/white-car match")
 
         except KeyboardInterrupt:
             log("Shutting down")
