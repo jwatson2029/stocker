@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-YOLOv8n school-bus + people detector → Discord.
+YOLOv8 school-bus + people detector → Discord.
 
-COCO car/bus/truck (+ person) detections; yellow filter for school buses.
+Full-frame YOLO (no ROI crop). School bus = yellow body on bus/truck/car
+candidates with class-dependent yellow + shape gates (cars need much stronger
+yellow so ordinary vehicles don't alert).
 
 Env:
   IMAGE_ID, DISCORD_WEBHOOK_URL
-  DETECT_INTERVAL_SECS (default 0.5)  # YOLO on 1 CPU can't do true 0.1s
+  DETECT_INTERVAL_SECS (default 0.5)
   DETECT_COOLDOWN_SECS (default 60)
-  DETECT_MOTION_THRESHOLD (default 5)
-  DETECT_CONF (default 0.35)
-  DETECT_YELLOW_MIN (default 0.08)  # ROI fraction that must be school-bus yellow
+  DETECT_MOTION_THRESHOLD (default 3)
+  DETECT_FORCE_YOLO_SECS (default 2.5)  # run YOLO even if motion is low
+  DETECT_CONF (default 0.22)
+  DETECT_IMGSZ (default 960)  # higher = better small/far/edge recall
+  DETECT_YELLOW_MIN (default 0.12)  # base yellow fraction (bus class)
   DETECT_PEOPLE (default 1)
-  DETECT_PERSON_MIN_AREA (default 0.001)  # min box area as fraction of frame
-  DETECT_WHITE_CARS (default 0)     # temporary debug only
+  DETECT_PERSON_MIN_AREA (default 0.001)
+  DETECT_WHITE_CARS (default 0)
   YOLO_MODEL (default yolov8n.pt)
 """
 
@@ -33,9 +37,11 @@ IMAGE_ID = os.environ.get("IMAGE_ID", "19494")
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 INTERVAL = max(0.1, float(os.environ.get("DETECT_INTERVAL_SECS", "0.5")))
 COOLDOWN = max(15.0, float(os.environ.get("DETECT_COOLDOWN_SECS", "60")))
-MOTION_THR = float(os.environ.get("DETECT_MOTION_THRESHOLD", "5"))
-CONF = float(os.environ.get("DETECT_CONF", "0.35"))
-YELLOW_MIN = float(os.environ.get("DETECT_YELLOW_MIN", "0.08"))
+MOTION_THR = float(os.environ.get("DETECT_MOTION_THRESHOLD", "3"))
+FORCE_YOLO_SECS = max(0.5, float(os.environ.get("DETECT_FORCE_YOLO_SECS", "2.5")))
+CONF = float(os.environ.get("DETECT_CONF", "0.22"))
+IMGSZ = int(os.environ.get("DETECT_IMGSZ", "960"))
+YELLOW_MIN = float(os.environ.get("DETECT_YELLOW_MIN", "0.12"))
 PERSON_MIN_AREA = float(os.environ.get("DETECT_PERSON_MIN_AREA", "0.001"))
 DETECT_PEOPLE = os.environ.get("DETECT_PEOPLE", "1").strip() not in (
     "0",
@@ -50,7 +56,7 @@ DETECT_WHITE_CARS = os.environ.get("DETECT_WHITE_CARS", "0").strip() not in (
     "no",
 )
 MODEL_NAME = os.environ.get("YOLO_MODEL", "yolov8n.pt")
-# COCO ids — school buses are usually "bus", sometimes "truck"
+# COCO ids — distant school buses are often "car"; close ones "bus"/"truck"
 CLS_PERSON, CLS_CAR, CLS_BUS, CLS_TRUCK = 0, 2, 5, 7
 UA = "stocker-yolo/1.0"
 
@@ -121,21 +127,104 @@ def motion_score(prev_gray, frame):
     return float(np.mean(cv2.absdiff(a, b))), gray
 
 
-def color_ratio(frame, xyxy, kind: str) -> float:
+def _clamp_box(xyxy, w: int, h: int):
     x1, y1, x2, y2 = [int(v) for v in xyxy]
-    h, w = frame.shape[:2]
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(w, x2), min(h, y2)
     if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def color_ratio(frame, xyxy, kind: str, *, inset: float = 0.0) -> float:
+    """Fraction of ROI pixels matching color. inset>0 uses inner crop (skip road/sky)."""
+    h, w = frame.shape[:2]
+    box = _clamp_box(xyxy, w, h)
+    if box is None:
         return 0.0
+    x1, y1, x2, y2 = box
+    if inset > 0:
+        bw, bh = x2 - x1, y2 - y1
+        dx, dy = int(bw * inset), int(bh * inset)
+        x1, y1 = x1 + dx, y1 + dy
+        x2, y2 = x2 - dx, y2 - dy
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
     roi = frame[y1:y2, x1:x2]
+    if roi.size == 0:
+        return 0.0
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     if kind == "yellow":
-        # School-bus chrome yellow / amber
-        mask = cv2.inRange(hsv, (8, 60, 70), (42, 255, 255))
+        # School-bus chrome yellow (tighter than amber/headlights)
+        mask = cv2.inRange(hsv, (12, 90, 90), (38, 255, 255))
     else:  # white
         mask = cv2.inRange(hsv, (0, 0, 170), (179, 60, 255))
     return float(np.count_nonzero(mask)) / float(mask.size)
+
+
+def box_geom(xyxy, frame_area: float):
+    x1, y1, x2, y2 = xyxy
+    bw = max(1.0, float(x2 - x1))
+    bh = max(1.0, float(y2 - y1))
+    area = (bw * bh) / frame_area
+    aspect = bw / bh
+    return area, aspect
+
+
+def school_bus_yellow(frame, xyxy) -> float:
+    """Yellow score from body of vehicle (inner bbox), not wheels/road."""
+    return color_ratio(frame, xyxy, "yellow", inset=0.18)
+
+
+def is_school_bus_candidate(cls_id: int, conf: float, yellow: float, area: float, aspect: float):
+    """
+    Class-dependent gates:
+      bus   — YOLO said bus; moderate yellow enough
+      truck — often cars mislabeled; need more yellow + bus-like proportions
+      car   — distant buses often labeled car; strict yellow + wide/large body
+    Rejects ordinary cars/trucks that only have a bit of amber light/paint.
+    """
+    # Tiny specs / noise
+    if area < 0.0004:
+        return False
+
+    if cls_id == CLS_BUS:
+        # Real bus class: allow smaller/far objects; still need real yellow body
+        if yellow < YELLOW_MIN:
+            return False
+        if conf < CONF:
+            return False
+        # Front-on buses can be near-square; side views are wide
+        if aspect < 0.55 or aspect > 5.0:
+            return False
+        return True
+
+    if cls_id == CLS_TRUCK:
+        # Trucks/SUVs often FP as "yellow school bus" — be stricter
+        if yellow < max(0.20, YELLOW_MIN * 1.6):
+            return False
+        if conf < max(CONF, 0.28):
+            return False
+        # Prefer elongated side profiles typical of a bus
+        if aspect < 1.15 or aspect > 4.5:
+            return False
+        if area < 0.001:
+            return False
+        return True
+
+    if cls_id == CLS_CAR:
+        # Only for far buses YOLO calls "car" — require lots of chrome yellow
+        if yellow < max(0.28, YELLOW_MIN * 2.2):
+            return False
+        if conf < max(CONF, 0.25):
+            return False
+        if aspect < 1.25 or aspect > 4.5:
+            return False
+        if area < 0.0008:
+            return False
+        return True
+
+    return False
 
 
 def notify_discord(frame, title: str, filename: str, meta: str):
@@ -161,8 +250,9 @@ def main() -> int:
         targets.append("people")
     log(
         f"Detector starting (model={MODEL_NAME}, image={IMAGE_ID}, "
-        f"every {INTERVAL}s, motion≥{MOTION_THR}, conf≥{CONF}, "
-        f"yellow≥{YELLOW_MIN}, people={'on' if DETECT_PEOPLE else 'off'}, "
+        f"every {INTERVAL}s, motion≥{MOTION_THR}, force_yolo≤{FORCE_YOLO_SECS}s, "
+        f"conf≥{CONF}, imgsz={IMGSZ}, yellow≥{YELLOW_MIN}, "
+        f"people={'on' if DETECT_PEOPLE else 'off'}, "
         f"white_cars={'on' if DETECT_WHITE_CARS else 'off'}, "
         f"webhook={'yes' if WEBHOOK else 'no'})"
     )
@@ -176,7 +266,8 @@ def main() -> int:
                 json={
                     "content": (
                         f"✅ Detector online (`{MODEL_NAME}`) for camera "
-                        f"`{IMAGE_ID}` — {', '.join(targets)}."
+                        f"`{IMAGE_ID}` — {', '.join(targets)} "
+                        f"(full frame, imgsz={IMGSZ})."
                     )
                 },
                 timeout=20,
@@ -189,6 +280,7 @@ def main() -> int:
     prev_gray = None
     last_alert = {"bus": 0.0, "person": 0.0, "white_car": 0.0}
     last_heartbeat = 0.0
+    last_yolo_at = 0.0
     hls_url = None
     hls_at = 0.0
     frames_ok = 0
@@ -222,16 +314,23 @@ def main() -> int:
                 log(f"Heartbeat frames={frames_ok} motion={score:.1f}")
                 last_heartbeat = time.time()
 
-            if score < MOTION_THR:
+            # Always scan the full frame: motion can be quiet when a bus is
+            # already in view (esp. far / top-left), so force YOLO periodically.
+            force = (time.time() - last_yolo_at) >= FORCE_YOLO_SECS
+            if score < MOTION_THR and not force:
                 time.sleep(max(0.0, INTERVAL - (time.time() - t0)))
                 continue
 
+            last_yolo_at = time.time()
             results = model.predict(
                 frame,
                 classes=classes,
                 conf=CONF,
                 verbose=False,
-                imgsz=640,
+                imgsz=IMGSZ,
+                # Slight boost for edge / small objects without a second model
+                augment=False,
+                agnostic_nms=False,
             )
             boxes = results[0].boxes
             best_bus = None
@@ -251,13 +350,17 @@ def main() -> int:
                     CLS_TRUCK: "truck",
                 }.get(cls_id, str(cls_id))
 
-                # School bus: yellow body on bus/truck (YOLO sometimes says truck)
-                if cls_id in (CLS_BUS, CLS_TRUCK):
-                    y = color_ratio(frame, xyxy, "yellow")
-                    if y >= YELLOW_MIN:
-                        key = conf + y
+                if cls_id in (CLS_BUS, CLS_TRUCK, CLS_CAR):
+                    area, aspect = box_geom(xyxy, frame_area)
+                    yellow = school_bus_yellow(frame, xyxy)
+                    if is_school_bus_candidate(cls_id, conf, yellow, area, aspect):
+                        # Prefer true "bus" class, then yellow strength, then conf
+                        class_boost = {CLS_BUS: 1.0, CLS_TRUCK: 0.35, CLS_CAR: 0.15}.get(
+                            cls_id, 0.0
+                        )
+                        key = class_boost + yellow + conf * 0.5
                         if best_bus is None or key > best_bus[0]:
-                            best_bus = (key, conf, y, xyxy, name)
+                            best_bus = (key, conf, yellow, xyxy, name, area, aspect)
 
                 if DETECT_PEOPLE and cls_id == CLS_PERSON:
                     x1, y1, x2, y2 = xyxy
@@ -276,7 +379,7 @@ def main() -> int:
 
             now = time.time()
             if best_bus:
-                _, conf, y, xyxy, name = best_bus
+                _, conf, y, xyxy, name, area, aspect = best_bus
                 if now - last_alert["bus"] >= COOLDOWN:
                     annotated = frame.copy()
                     x1, y1, x2, y2 = [int(v) for v in xyxy]
@@ -290,13 +393,19 @@ def main() -> int:
                         (0, 200, 255),
                         2,
                     )
-                    log(f"ALERT school bus conf={conf:.2f} yellow={y:.2f} cls={name}")
+                    log(
+                        f"ALERT school bus conf={conf:.2f} yellow={y:.2f} "
+                        f"cls={name} area={area:.4f} aspect={aspect:.2f}"
+                    )
                     if WEBHOOK:
                         notify_discord(
                             annotated,
                             "🟡 **School bus detected!**",
                             "bus.jpg",
-                            f"YOLO `{name}` · conf `{conf:.0%}` · yellow `{y:.0%}`",
+                            (
+                                f"YOLO `{name}` · conf `{conf:.0%}` · "
+                                f"yellow `{y:.0%}` · area `{area:.2%}`"
+                            ),
                         )
                     last_alert["bus"] = now
                 else:

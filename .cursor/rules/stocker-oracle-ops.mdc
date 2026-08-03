@@ -1,0 +1,30 @@
+---
+description: Stocker Oracle VM, Supabase security, and detector ops context
+alwaysApply: true
+---
+
+# Stocker ops context
+
+## Oracle Always Free VM
+- Host: `opc@129.146.50.140` (Phoenix), shape **VM.Standard.A1.Flex 1 OCPU / 6 GB**, Oracle Linux 9 aarch64
+- SSH key (local): `/Users/jameswatson/Downloads/ssh-key-2026-08-02 (2).key`
+- SSH often rejects (`Not allowed at this time` / reset) — spam reconnect until auth works
+- Boot volume **100 GB** (within 200 GB Always Free). Prefer **Balanced** volume performance, not Higher Performance
+- Free room: ≤2 OCPU / 12 GB compute, ≤200 GB storage, 10 TB egress/mo. This VM (~60–70 GB egress/mo uploads) fits
+- Idle reclaim: 7 days with CPU/net/mem all &lt;20% — keep recorder+detect 24/7
+- Do **not** `podman system prune -af` (wipes recorder image)
+
+## Containers (Podman on VM)
+- `stocker-recorder` — 24/7 30s source-quality clips → Supabase; `--restart=always`
+- `stocker-detect` — YOLOv8n school buses (yellow) + people → Discord; **must** `--network=host --env-file ~/stocker/.env`
+- Code lives in `~/stocker` on the VM; inject script updates with `podman cp` (bind mounts hit SELinux permission denials)
+- Env highlights: `IMAGE_ID=19494`, `DETECT_PEOPLE=1`, `DETECT_WHITE_CARS=0`, `DETECT_YELLOW_MIN=0.12`, `DETECT_CONF=0.22`, `DETECT_IMGSZ=960`, Discord webhook
+
+## Supabase network restrictions
+- DB IP allowlist applies only to **direct Postgres** and **connection pooler**, not PostgREST/Storage HTTPS
+- To allow only the recorder VM: IPv4 `129.146.50.140`, CIDR **`32`** (never `0.0.0.0`)
+- Also add the operator's home/office public IP `/32` if using SQL editor / `psql` from laptop
+- Still require: RLS on tables, service role server-side only, rotate leaked keys/webhooks
+
+## Git
+- Repo: `https://github.com/jwatson2029/stocker` — detector changes live in `scripts/detect-bus.py`
