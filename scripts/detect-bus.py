@@ -18,7 +18,7 @@ Env:
   DETECT_PEOPLE (default 0)
   DETECT_PERSON_MIN_AREA (default 0.001)
   DETECT_WHITE_CARS (default 0)
-  YOLO_MODEL (default yolo26s.pt)
+  YOLO_MODEL (default yolo26s.onnx)  # .onnx = faster CPU; falls back/export from .pt
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ DETECT_WHITE_CARS = os.environ.get("DETECT_WHITE_CARS", "0").strip() not in (
     "False",
     "no",
 )
-MODEL_NAME = os.environ.get("YOLO_MODEL", "yolo26s.pt")
+MODEL_NAME = os.environ.get("YOLO_MODEL", "yolo26s.onnx")
 # COCO ids — distant school buses are often "car"; close ones "bus"/"truck"
 CLS_PERSON, CLS_CAR, CLS_BUS, CLS_TRUCK = 0, 2, 5, 7
 UA = "stocker-yolo/1.0"
@@ -63,6 +63,32 @@ UA = "stocker-yolo/1.0"
 
 def log(*args):
     print(datetime.now(timezone.utc).isoformat(), *args, flush=True)
+
+
+def resolve_model(name: str, imgsz: int) -> str:
+    """Prefer ONNX for faster CPU inference; export from .pt when needed."""
+    from ultralytics import YOLO
+
+    if name.endswith(".onnx"):
+        if os.path.isfile(name):
+            return name
+        pt = name[:-5] + ".pt"
+        log(f"ONNX missing — exporting {pt} → {name} (imgsz={imgsz})")
+        YOLO(pt).export(format="onnx", imgsz=imgsz, simplify=True)
+        if not os.path.isfile(name):
+            # ultralytics writes next to weights; search common paths
+            for cand in (name, os.path.basename(name), f"/app/{os.path.basename(name)}"):
+                if os.path.isfile(cand):
+                    return cand
+            raise FileNotFoundError(f"export finished but {name} not found")
+        return name
+
+    if name.endswith(".pt"):
+        onnx = name[:-3] + ".onnx"
+        if os.path.isfile(onnx):
+            log(f"Using existing ONNX {onnx} instead of {name}")
+            return onnx
+    return name
 
 
 def get_hls_url(image_id: str) -> str:
@@ -256,7 +282,9 @@ def main() -> int:
         f"white_cars={'on' if DETECT_WHITE_CARS else 'off'}, "
         f"webhook={'yes' if WEBHOOK else 'no'})"
     )
-    model = YOLO(MODEL_NAME)
+    weights = resolve_model(MODEL_NAME, IMGSZ)
+    log(f"Loading weights {weights}")
+    model = YOLO(weights)
     log("Model loaded")
 
     if WEBHOOK:
@@ -265,7 +293,7 @@ def main() -> int:
                 WEBHOOK,
                 json={
                     "content": (
-                        f"✅ Detector online (`{MODEL_NAME}`) for camera "
+                        f"✅ Detector online (`{weights}`) for camera "
                         f"`{IMAGE_ID}` — {', '.join(targets)} "
                         f"(full frame, imgsz={IMGSZ})."
                     )

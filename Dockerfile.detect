@@ -12,10 +12,11 @@ WORKDIR /app
 
 COPY requirements-detect.txt ./
 # CPU-only PyTorch (no CUDA) — fits Always Free ARM VMs
+# Pre-export ONNX for faster CPU inference at DETECT_IMGSZ
 RUN pip install --no-cache-dir --upgrade pip \
   && pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu \
   && pip install --no-cache-dir -r requirements-detect.txt \
-  && python -c "from ultralytics import YOLO; YOLO('yolo26s.pt')" \
+  && python -c "from ultralytics import YOLO; m=YOLO('yolo26s.pt'); m.export(format='onnx', imgsz=800, simplify=True)" \
   && rm -rf /root/.cache/pip
 
 COPY scripts/detect-bus.py ./scripts/detect-bus.py
