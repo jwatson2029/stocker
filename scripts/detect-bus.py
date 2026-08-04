@@ -284,7 +284,7 @@ def main() -> int:
     )
     weights = resolve_model(MODEL_NAME, IMGSZ)
     log(f"Loading weights {weights}")
-    model = YOLO(weights)
+    model = YOLO(weights, task="detect")
     log("Model loaded")
 
     if WEBHOOK:
