@@ -15,7 +15,7 @@ Env:
   DETECT_CONF (default 0.22)
   DETECT_IMGSZ (default 800)  # higher = better small/far; lower = faster checks
   DETECT_YELLOW_MIN (default 0.12)  # base yellow fraction (bus class)
-  DETECT_PEOPLE (default 1)
+  DETECT_PEOPLE (default 0)
   DETECT_PERSON_MIN_AREA (default 0.001)
   DETECT_WHITE_CARS (default 0)
   YOLO_MODEL (default yolo26s.pt)
@@ -43,7 +43,7 @@ CONF = float(os.environ.get("DETECT_CONF", "0.22"))
 IMGSZ = int(os.environ.get("DETECT_IMGSZ", "800"))
 YELLOW_MIN = float(os.environ.get("DETECT_YELLOW_MIN", "0.12"))
 PERSON_MIN_AREA = float(os.environ.get("DETECT_PERSON_MIN_AREA", "0.001"))
-DETECT_PEOPLE = os.environ.get("DETECT_PEOPLE", "1").strip() not in (
+DETECT_PEOPLE = os.environ.get("DETECT_PEOPLE", "0").strip() not in (
     "0",
     "false",
     "False",
